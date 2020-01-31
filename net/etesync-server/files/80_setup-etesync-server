@@ -1,0 +1,23 @@
+#!/bin/sh
+
+[ -x /etc/init.d/etesync-server ] && /etc/init.d/etesync-server stop
+
+cd /usr/share/etesync-server
+
+if [ ! -f "db.sqlite3" ]; then
+    echo "etesync-server: initalizing db.sqlite3 ..."
+    python3 manage.pyc migrate --noinput || exit 1
+    python3 manage.pyc shell -c "from django.contrib.auth.models import User; \
+        User.objects.create_superuser('root', '', 'root')"  || exit 1
+    echo "etesync-server: created user root:root."
+fi
+
+python3 manage.pyc collectstatic --noinput || exit 1
+
+chown -Rh etesync:nogroup . || exit 1
+
+[ -x /etc/init.d/nginx ] || exit 1
+
+/etc/init.d/nginx running && /etc/init.d/nginx reload || /etc/init.d/nginx start
+
+exit 0

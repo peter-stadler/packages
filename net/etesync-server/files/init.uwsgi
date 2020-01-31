@@ -1,0 +1,148 @@
+#!/bin/sh /etc/rc.common
+
+START=80
+
+USE_PROCD=1
+
+INI="; this file is autmatically re-created from /etc/config/etesync_server\n"
+
+NGINX_CHANGED=0
+
+config_nginx_for_domain() { # assuming "$1" == "[0-9A-za-z.-]*"
+    local domain="$1"
+
+    local dom="${domain%.}.?"
+    while [ "$dom" != "[.]?" ]; do
+
+        local rgx="${dom//./[.]}"
+        rgx="^\s*(?:server_name|\"server_name\"|'server_name')(?:\s.*)?" \
+            "\s(?:${rgx}|\"${rgx}\"|'${rgx}')(?:\s.*)?\s*;"
+
+        local prefer=""
+        local conf=""
+
+        for conf in $(grep -lE "${rgx}" /etc/nginx/conf.d/*.conf); do
+            grep -qE '^\s*include\s+etesync.locations\s*;' "${conf}" && return
+            grep -qE '^\s*ssl_certificate\s' "${conf}" && prefer="${conf}"
+        done
+
+        [ -z "${prefer}" ] \
+        && echo "Consider adding a self-signed certifacate by: " \
+                "	nginx-util add_ssl '$(basename "${conf}" .conf)'" \
+        || conf="${prefer}"
+
+        [ -n "${conf}" ] && { # use prefered or last file containing ${rgx}.
+            echo "Adding 'include etesync.locations;' to: ${conf}"
+            sed -iE "/${rgx}/a	include etesync.locations;" "${conf}" \
+            && NGINX_CHANGED=1
+
+            return
+        }
+
+        [ "${dom:0:3}" == "[*]" ] && dom="${dom:3}" || dom="[*].${dom#?*.}"
+    done
+
+    # no conf file with suitable server_name:
+    local conf="/etc/nginx/conf.d/${domain}.conf"
+    echo "Creating ${conf} with 'include etesync.locations;' ..."
+    sed -E "s/DOMAIN;/'${domain}';/g" \
+        /usr/share/etesync-server/nginx.conf.template > "${conf}" \
+    && nginx-util add_ssl "${domain}" \
+    && NGINX_CHANGED=1
+}
+
+
+config_allowed_hosts_indirectly() {
+    option_cb() { return; }
+
+    list_cb() {
+        [ "$1" == "allow_all_ips_of" ] && {
+            local iface="${2//[^0-9A-Za-z.-]}"
+
+            for ip in \
+                $(ifstatus $iface | jsonfilter -e '@["ipv4-address"].*.address')
+            do INI="${INI}allowed_host_${ip//[^0-9]/_} = ${ip}\n"; done
+
+            for ip in \
+                $(ifstatus $iface | jsonfilter -e '@["ipv6-address"].*.address')
+            do INI="${INI}allowed_host_${ip//[^0-9A-Fa-f]/_} = [${ip}]\n"; done
+
+            return
+        }
+
+        [ "$1" == "allowed_host" ] && {
+            local domain="${2//[^0-9A-Za-z.-]}"
+
+            [ "$2" == "${domain}" ] \
+            || echo "Error: allowed_host '$2' invalid, using ${domain} ..."
+
+            INI="${INI}allowed_host_${domain//[.-]/_} = ${domain}\n"
+
+            config_nginx_for_domain "${domain}"
+
+            return
+        }
+    }
+}
+
+
+config_cb() {
+    local type="$1"
+    local name="$2"
+    [ -n "$type" -o -n "$name" ] && {
+        INI="${INI}\n[${name}]\n";
+
+        [ "$type" == "indirect" -a "$name" == "allowed_hosts" ] \
+        && config_allowed_hosts_indirectly \
+        || option_cb() { INI="${INI}$1 = $2\n"; }
+    } || {
+        reset_cb
+
+        printf "$INI" > /var/etc/etesync-server.ini
+
+        [ -x /etc/init.d/nginx ] || exit 1
+
+        /etc/init.d/nginx running && {
+            [ "${NGINX_CHANGED}" -ne 0 ] \
+            && echo "Reloading Nginx with changed configuration ..." \
+            && /etc/init.d/nginx reload
+        } || {
+            echo "Starting Nginx ..."
+            /etc/init.d/nginx start
+        }
+    }
+}
+
+
+start_service() {
+    rm -f /var/etc/etesync-server.ini
+    config_load etesync_server
+
+    [ -e /usr/share/etesync-server/etesync-server.ini ] \
+    || ln -s /var/etc/etesync-server.ini /usr/share/etesync-server/
+
+    cd /etc/uwsgi/vassals/ && ln -s etesync-server.uwsgi etesync-server.ini
+}
+
+
+stop_service() {
+    rm -f /etc/uwsgi/vassals/etesync-server.ini /var/etc/etesync-server.ini
+}
+
+
+service_triggers() {
+    procd_add_reload_trigger etesync_server
+    procd_add_reload_interface_trigger loopback
+    procd_add_reload_interface_trigger lan
+}
+
+
+reload_service() {
+    rm -f /var/etc/etesync-server.ini
+    config_load etesync_server
+
+    cd /etc/uwsgi/vassals/ || exit 1
+    [ -e etesync-server.ini ] \
+    && touch --no-dereference etesync-server.ini \
+    || ln -s etesync-server.uwsgi etesync-server.ini
+}
