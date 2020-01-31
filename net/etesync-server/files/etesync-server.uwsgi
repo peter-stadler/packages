@@ -1,0 +1,29 @@
+[uwsgi]
+strict = true
+if-not-env = UWSGI_EMPEROR_FD
+socket = /var/run/etesync-server.socket
+vacuum = true
+end-if =
+chmod-socket = 660
+chown-socket = etesync:nogroup
+uid = etesync
+gid = nogroup
+plugin = python
+mount = /etesync=etesync_server.wsgi:application
+manage-script-name = true
+chdir = /usr/share/etesync-server
+enable-threads = true
+thunder-lock = true
+post-buffering = 8192
+harakiri = 60
+lazy-apps = true
+master = true
+idle = 600
+plugin = syslog
+logger = etesync syslog:etesync-uwsgi
+log-route = etesync (arn|rror)
+; ignore-write-errors = true
+; ignore-sigpipe  = true
+log-format=%(method) %(uri) => return %(status) (%(rsize) bytes in %(msecs) ms)
+req-logger = syslog:etesync-uwsgi
+disable-logging = true

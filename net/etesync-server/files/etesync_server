@@ -1,0 +1,14 @@
+package "etesync_server"
+
+config direct "global"
+	option debug "false"
+	option static_url "/etesync/static/" # TODO for django 3.1: "static/"
+
+config indirect "allowed_hosts"
+	list allow_all_ips_of "loopback"
+	list allow_all_ips_of "lan"
+#	list allowed_host "example.com"
+
+config direct "database"
+	option engine "django.db.backends.sqlite3"
+	option name "db.sqlite3"
