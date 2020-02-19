@@ -4,6 +4,35 @@ PRINT_PASSED=2
 
 NGINX_UTIL="/usr/bin/nginx-util"
 
+
+eval $("${NGINX_UTIL}" get_env)
+
+mkdir -p /tmp/.uci/
+mkdir -p /etc/config/
+mkdir -p /var/lib/nginx/
+mkdir -p /etc/nginx/conf.d/
+
+cat >/etc/config/nginx <<EOF
+package 'nginx'
+
+config server 'asdf'
+    option ${MANAGE_SSL} 'false'
+    list ${LISTEN_LOCALLY} '80'
+EOF
+
+"${NGINX_UTIL}" add_ssl asdf
+"${NGINX_UTIL}" init_lan
+cat /var/lib/nginx/*
+echo "-------------"
+"${NGINX_UTIL}" del_ssl asdf
+"${NGINX_UTIL}" init_lan
+cat /var/lib/nginx/*
+
+
+exit 0 # TODO(pst)
+
+
+
 __esc_newlines() {
     echo "${1}" | sed -E 's/$/\\n/' | tr -d '\n' | sed -E 's/\\n$/\n/'
 }
@@ -83,6 +112,8 @@ function test() {
         && printf "%-72s%-1s\n" "$1" "2>/dev/null >/dev/null (-> $2?) passed."
     else
         printf "%-72s%-1s\n" "$1" "2>/dev/null >/dev/null (-> $2?) failed!!!"
+        [ "${PRINT_PASSED}" -gt 0 ] && printf "\n### Snip:\n" && eval "$1"
+        [ "${PRINT_PASSED}" -gt 0 ] && printf "### Snap.\n"
         [ "${PRINT_PASSED}" -gt 1 ] && exit 1
     fi
 }
@@ -99,9 +130,14 @@ test '[ -n "${LAN_SSL_LISTEN}" ]' 0
 test '[ -n "${SSL_SESSION_CACHE_ARG}" ]' 0
 test '[ -n "${SSL_SESSION_TIMEOUT_ARG}" ]' 0
 test '[ -n "${ADD_SSL_FCT}" ]' 0
+test '[ -n "${MANAGE_SSL}" ]' 0
+test '[ -n "${LISTEN_LOCALLY}" ]' 0
 
 
 [ "$PRINT_PASSED" -gt 0 ] && printf "\nPrepare files in ${CONF_DIR} ...\n"
+
+mkdir -p /etc/config/
+echo "package 'nginx'" >/etc/config/nginx #dummy
 
 mkdir -p ${CONF_DIR}
 

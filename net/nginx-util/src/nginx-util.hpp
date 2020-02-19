@@ -4,17 +4,20 @@
 #include <array>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <iostream>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 #ifndef NO_UBUS
 #include "ubus-cxx.hpp"
 #endif
 
+#include "uci-cxx.hpp"
 
 static constexpr auto NGINX_UTIL = std::string_view{"/usr/bin/nginx-util"};
 
@@ -24,9 +27,13 @@ static constexpr auto CONF_DIR = std::string_view{"/etc/nginx/conf.d/"};
 
 static constexpr auto LAN_NAME = std::string_view{"_lan"};
 
+static auto constexpr LISTEN_LOCALLY = std::string_view{"listen_locally"};
+
+static auto constexpr MANAGE_SSL = std::string_view{"manage_selfsigned"};
+
 static constexpr auto LAN_LISTEN =std::string_view{"/var/lib/nginx/lan.listen"};
 
-static constexpr auto LAN_LISTEN_DEFAULT =
+static constexpr auto LAN_LISTEN_DEFAULT = //TODO(pst) deprecate
     std::string_view{"/var/lib/nginx/lan.listen.default"};
 
 
@@ -45,7 +52,10 @@ template<typename ...S>
 auto call(const std::string & program, S... args) -> pid_t;
 
 
-void create_lan_listen();
+auto create_lan_listen() -> std::vector<std::string>;
+
+
+void init_conf(const uci::package & pkg, const std::vector<std::string> & ips);
 
 
 void init_lan();
@@ -61,15 +71,34 @@ void get_env();
 void write_file(const std::string_view & name, const std::string & str,
                 const std::ios_base::openmode flag)
 {
-    std::ofstream file(name.data(), flag);
-    if (!file.good()) {
-        throw std::ofstream::failure(
-            "write_file error: cannot open " + std::string{name});
+    auto tmp = std::string{name};
+
+    if ( (flag & std::ios::ate) == 0 && (flag & std::ios::app) == 0 ) {
+        tmp += ".tmp-XXXXXX";
+        auto fd = mkstemp(&tmp[0]);
+        if (fd==-1 || close(fd)!=0)
+        { throw std::runtime_error("write_file error: cannot access " + tmp); }
     }
 
-    file<<str<<std::flush;
+    try {
+        std::ofstream file(tmp.data(), flag);
+        if (!file.good()) {
+            throw std::ofstream::failure
+                ("write_file error: cannot open " + std::string{tmp});
+        }
 
-    file.close();
+        file<<str<<std::flush;
+
+        file.close();
+    } catch(...) {
+        if (tmp!=name) { remove(tmp.c_str()); } //remove can fail.
+        throw;
+    }
+
+    if (rename(tmp.c_str(), name.data()) != 0) {
+        throw std::runtime_error
+            ("write_file error: cannot move " + tmp + " to " + name.data());
+    }
 }
 
 
