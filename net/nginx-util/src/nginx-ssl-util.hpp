@@ -76,8 +76,13 @@ auto get_if_missed(const std::string & conf, const Line & LINE,
     -> std::string;
 
 
-auto delete_if(const std::string & conf, const rgx::regex & rgx,
-               const std::string & val="")
+auto replace_if(const std::string & conf, const rgx::regex & rgx,
+                const std::string & val, const std::string & insert)
+    -> std::string;
+
+
+auto replace_listen(const std::string & conf,
+                    const std::array<const char *, 2> & ngx_port)
     -> std::string;
 
 
@@ -145,7 +150,7 @@ constexpr auto _newline = _Line{
 
     [](const std::string & /*param*/, const std::string & /*begin*/)
         -> std::string
-    { return std::string{"\n"}; }
+    { return std::string{"(\n)"}; } //capture it as _end captures it, too.
 };
 
 
@@ -156,7 +161,7 @@ constexpr auto _end = _Line{
 
     [](const std::string & /*param*/, const std::string & /*begin*/)
         -> std::string
-    { return std::string{R"(\s*;(?:[\t ]*#[^\n]*)?)"}; }
+    { return std::string{R"(\s*(;(?:[\t ]*#[^\n]*)?))"}; }
 };
 
 
@@ -208,6 +213,8 @@ constexpr auto _escape = _Line{
 constexpr std::string_view _check_ssl = "check_ssl";
 
 constexpr std::string_view _server_name = "server_name";
+
+constexpr std::string_view _listen = "listen";
 
 constexpr std::string_view _include = "include";
 
@@ -262,6 +269,19 @@ static const auto NGX_SSL_SESSION_CACHE = Line::build
 static const auto NGX_SSL_SESSION_TIMEOUT = Line::build
     <_begin, _escape<_ssl_session_timeout>, _space, _capture<';'>, _end>();
 
+static const auto NGX_LISTEN =
+    Line::build<_begin, _escape<_listen>, _space, _capture<';'>, _end>();
+
+static const auto NGX_PORT_80 = std::array<const char *, 2>{
+    R"(^\s*([^:]*:|\[[^\]]*\]:)?80(\s|$|;))",
+    "$01443 ssl$2",
+};
+
+static const auto NGX_PORT_443 = std::array<const char *, 2>{
+    R"(^\s*([^:]*:|\[[^\]]*\]:)?443(\s.*)?\sssl(\s|$|;))",
+    "$0180$2$3",
+};
+
 
 
 // ------------------------- implementation: ----------------------------------
@@ -282,7 +302,7 @@ auto get_if_missed(const std::string & conf, const Line & LINE,
          rgx::regex_search(pos, conf.end(), match, LINE.RGX());
          pos += match.position(0) + match.length(0))
     {
-        const std::string value = match.str(match.size() - 1);
+        const std::string value = match.str(match.size() - 2);
 
         if (value==val || value=="'"+val+"'" || value=='"'+val+'"') {
             return "";
@@ -293,24 +313,52 @@ auto get_if_missed(const std::string & conf, const Line & LINE,
 }
 
 
-auto delete_if(const std::string & conf, const rgx::regex & rgx,
-               const std::string & val)
+auto replace_if(const std::string & conf, const rgx::regex & rgx,
+                const std::string & val, const std::string & insert)
+    -> std::string
+{
+    std::string ret{};
+    auto pos = conf.begin();
+
+    auto skip = 0;
+    for (rgx::smatch match;
+         rgx::regex_search(pos, conf.end(), match, rgx);
+         pos += match.position(match.size()-1))
+    {
+        auto i = match.size() - 2;
+        const std::string value = match.str(i);
+
+        bool compare = !val.empty();
+        if (compare && value!=val && value!="'"+val+"'" && value!='"'+val+'"') {
+            ret.append(pos+skip, pos + match.position(i) + match.length(i));
+            skip = 0;
+        } else {
+            ret.append(pos+skip, pos + match.position(match.size()>2 ? 1 : 0));
+            ret += insert;
+            skip = 1;
+        }
+    }
+
+    ret.append(pos+skip, conf.end());
+    return ret;
+}
+
+
+auto replace_listen(const std::string & conf,
+                    const std::array<const char *, 2> & ngx_port)
     -> std::string
 {
     std::string ret{};
     auto pos = conf.begin();
 
     for (rgx::smatch match;
-         rgx::regex_search(pos, conf.end(), match, rgx);
-         pos += match.position(0) + match.length(0))
+         rgx::regex_search(pos, conf.end(), match, NGX_LISTEN.RGX());
+         pos += match.position(match.size()-1))
     {
-        const std::string value = match.str(match.size() - 1);
-        auto len = match.position( match.size()>1 ? 1 : 0 );
-        bool compare = !val.empty();
-        if (compare && value!=val && value!="'"+val+"'" && value!='"'+val+'"') {
-            len = match.position(0) + match.length(0);
-        }
-        ret.append(pos, pos + len);
+        auto i = match.size() - 2;
+        ret.append(pos, pos + match.position(i));
+        ret += rgx::regex_replace(match.str(i),
+                                  rgx::regex{ngx_port[0]}, ngx_port[1]);
     }
 
     ret.append(pos, conf.end());
@@ -318,13 +366,12 @@ auto delete_if(const std::string & conf, const rgx::regex & rgx,
 }
 
 
-inline void add_ssl_directives_to(const std::string & name, const bool isdefault)
+inline void add_ssl_directives_to(const std::string & name)
 {
     const std::string prefix = std::string{CONF_DIR} + name;
 
-    std::string conf = read_file(prefix+".conf");
+    const std::string const_conf= read_file(prefix+".conf");
 
-    const std::string & const_conf = conf; // iteration needs const string.
     rgx::smatch match; // captures str(1)=indentation spaces, str(2)=server name
     for (auto pos = const_conf.begin();
         rgx::regex_search(pos, const_conf.end(), match, NGX_SERVER_NAME.RGX());
@@ -334,34 +381,33 @@ inline void add_ssl_directives_to(const std::string & name, const bool isdefault
 
         const std::string indent = match.str(1);
 
-        std::string adds = isdefault ?
-            get_if_missed(conf, NGX_INCLUDE_LAN_SSL_LISTEN_DEFAULT,"",indent) :
-            get_if_missed(conf, NGX_INCLUDE_LAN_SSL_LISTEN, "", indent);
+        auto adds = std::string{};
 
-        adds += get_if_missed(conf, NGX_SSL_CRT, prefix+".crt", indent);
+        adds += get_if_missed(const_conf, NGX_SSL_CRT, prefix+".crt", indent);
 
-        adds += get_if_missed(conf, NGX_SSL_KEY, prefix+".key", indent);
+        adds += get_if_missed(const_conf, NGX_SSL_KEY, prefix+".key", indent);
 
-        adds += get_if_missed(conf, NGX_SSL_SESSION_CACHE,
+        adds += get_if_missed(const_conf, NGX_SSL_SESSION_CACHE,
                               SSL_SESSION_CACHE_ARG(name), indent, false);
 
-        adds += get_if_missed(conf, NGX_SSL_SESSION_TIMEOUT,
+        adds += get_if_missed(const_conf, NGX_SSL_SESSION_TIMEOUT,
                         std::string{SSL_SESSION_TIMEOUT_ARG}, indent, false);
 
-        if (adds.length() > 0) {
-            pos += match.position(0) + match.length(0);
+        pos += match.position(0) + match.length(0);
+        std::string conf = std::string(const_conf.begin(), pos) + adds +
+                           std::string(pos, const_conf.end());
 
-            conf = std::string(const_conf.begin(), pos) + adds +
-                    std::string(pos, const_conf.end());
+        conf = replace_if(conf, NGX_INCLUDE_LAN_LISTEN_DEFAULT.RGX(), "",
+                          NGX_INCLUDE_LAN_SSL_LISTEN_DEFAULT.STR("", indent));
 
-            conf = isdefault ?
-                delete_if(conf, NGX_INCLUDE_LAN_LISTEN_DEFAULT.RGX()) :
-                delete_if(conf, NGX_INCLUDE_LAN_LISTEN.RGX());
+        conf = replace_if(conf, NGX_INCLUDE_LAN_LISTEN.RGX(), "",
+                          NGX_INCLUDE_LAN_SSL_LISTEN.STR("", indent));
 
+        conf = replace_listen(conf, NGX_PORT_80);
+
+        if (conf != const_conf) {
             write_file(prefix+".conf", conf);
-
-            std::cerr<<"Added SSL directives to "<<prefix<<".conf: ";
-            std::cerr<<adds<<std::endl;
+            std::cerr<<"Added SSL directives to "<<prefix<<".conf\n";
         }
 
         return;
@@ -571,9 +617,8 @@ inline auto add_ssl_to_config(const std::string & name)
             else if (opt.name()=="ssl_certificate") { ret.crt = itm.name(); }
 
             else if (opt.name()=="listen" || opt.name()==LISTEN_LOCALLY) {
-                static const auto rgx_port =
-                    rgx::regex{R"(^\s*([^:]*:|\[[^]]*\]:)?80(\s|$|;))"};
-                auto val = regex_replace(itm.name(), rgx_port, "$01443 ssl$2");
+                auto val = regex_replace(itm.name(), rgx::regex{NGX_PORT_80[0]},
+                                         NGX_PORT_80[1]);
                 if (val!=itm.name()) {
                     std::cerr<<"\t"<<opt.name()<<"='"<<val<<"' (replacing)\n";
                     itm.rename(val.c_str());
@@ -651,7 +696,7 @@ void add_ssl_if_needed(const std::string & name)
 {
     const auto legacypath = std::string{CONF_DIR} + name + ".conf";
     if (access(legacypath.c_str(), R_OK)==0) {
-        add_ssl_directives_to(name, name==LAN_NAME); // let it throw.
+        add_ssl_directives_to(name); // let it throw.
 
         const auto crtpath = std::string{CONF_DIR} + name + ".crt";
         const auto keypath = std::string{CONF_DIR} + name + ".key";
@@ -692,7 +737,7 @@ void remove_cron_job(const Line & CRON_LINE, const std::string & name)
 
         auto line = const_conf.substr(prev, curr-prev+1);
 
-        if (line==delete_if(line, CRON_LINE.RGX(), name)) {
+        if (line==replace_if(line, CRON_LINE.RGX(), name, "")) {
             conf += line;
         } else { changed = true; }
 
@@ -714,14 +759,12 @@ void remove_cron_job(const Line & CRON_LINE, const std::string & name)
 }
 
 
-inline void del_ssl_directives_from(const std::string & name,
-                                    const bool isdefault)
+inline void del_ssl_directives_from(const std::string & name)
 {
     const std::string prefix = std::string{CONF_DIR} + name;
 
-    std::string conf = read_file(prefix+".conf");
+    const std::string const_conf = read_file(prefix+".conf");
 
-    const std::string & const_conf = conf; // iteration needs const string.
     rgx::smatch match; // captures str(1)=indentation spaces, str(2)=server name
     for (auto pos = const_conf.begin();
         rgx::regex_search(pos, const_conf.end(), match, NGX_SERVER_NAME.RGX());
@@ -731,32 +774,28 @@ inline void del_ssl_directives_from(const std::string & name,
 
         const std::string indent = match.str(1);
 
-        std::string adds = isdefault ?
-            get_if_missed(conf, NGX_INCLUDE_LAN_LISTEN_DEFAULT,"",indent) :
-            get_if_missed(conf, NGX_INCLUDE_LAN_LISTEN, "", indent);
+        std::string conf = const_conf;
 
-        if (adds.length() > 0) {
-            pos += match.position(1);
+        conf = replace_listen(conf, NGX_PORT_443);
 
-            conf = std::string(const_conf.begin(), pos) + adds
-                    + std::string(pos, const_conf.end());
+        conf = replace_if(conf, NGX_INCLUDE_LAN_SSL_LISTEN_DEFAULT.RGX(), "",
+                          NGX_INCLUDE_LAN_LISTEN_DEFAULT.STR("", indent));
 
-            conf = isdefault ?
-                delete_if(conf, NGX_INCLUDE_LAN_SSL_LISTEN_DEFAULT.RGX())
-                : delete_if(conf, NGX_INCLUDE_LAN_SSL_LISTEN.RGX());
+        conf = replace_if(conf, NGX_INCLUDE_LAN_SSL_LISTEN.RGX(), "",
+                          NGX_INCLUDE_LAN_LISTEN.STR("", indent));
 
-            const auto crtpath = prefix+".crt";
-            conf = delete_if(conf, NGX_SSL_CRT.RGX(), crtpath);
+        //NOLINTNEXTLINE(performance-inefficient-string-concatenation) prefix:
+        conf = replace_if(conf, NGX_SSL_CRT.RGX(), prefix+".crt", "");
 
-            const auto keypath = prefix+".key";
-            conf = delete_if(conf, NGX_SSL_KEY.RGX(), keypath);
+        //NOLINTNEXTLINE(performance-inefficient-string-concatenation) prefix:
+        conf = replace_if(conf, NGX_SSL_KEY.RGX(), prefix+".key", "");
 
-            conf = delete_if(conf, NGX_SSL_SESSION_CACHE.RGX());
+        conf = replace_if(conf, NGX_SSL_SESSION_CACHE.RGX(), "", "");
 
-            conf = delete_if(conf, NGX_SSL_SESSION_TIMEOUT.RGX());
+        conf = replace_if(conf, NGX_SSL_SESSION_TIMEOUT.RGX(), "", "");
 
+        if (conf!=const_conf) {
             write_file(prefix+".conf", conf);
-
             std::cerr<<"Deleted SSL directives from "<<prefix<<".conf\n";
         }
 
@@ -804,9 +843,8 @@ inline auto del_ssl_from_config(const std::string & name)
             { manage = true; }
 
             else if (opt.name()=="listen" || opt.name()==LISTEN_LOCALLY) {
-                static const auto rgx_port = rgx::regex
-                    {R"(^\s*([^:]*:|\[[^]]*\]:)?443(\s.*)?\sssl(\s|$|;))"};
-                auto val = regex_replace(itm.name(), rgx_port, "$0180$2$3");
+                auto val = regex_replace(itm.name(), rgx::regex{NGX_PORT_443[0]},
+                                         NGX_PORT_443[1]);
                 if (val!=itm.name()) {
                     std::cerr<<"\t"<<opt.name()<<" (set back to '"<<val<<"')\n";
                     itm.rename(val.c_str());
@@ -845,7 +883,7 @@ auto del_ssl_legacy(const std::string & name) -> bool
         std::cerr<<"the self-signed SSL certificate for "<<name<<"\n";
     }
 
-    try { del_ssl_directives_from(name, name==LAN_NAME); }
+    try { del_ssl_directives_from(name); }
     catch (...) {
         std::cerr<<"del_ssl error: ";
         std::cerr<<"cannot delete SSL directives from "<<name<<".conf\n";

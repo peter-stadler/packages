@@ -28,7 +28,6 @@ cp "/usr/local/bin/uci" "${TMPROOT}/usr/bin/"
 cp "./test-nginx-util-root.sh" "${TMPROOT}/usr/bin/"
 
 
-
 printf "\n\n******* Testing nginx-ssl-util-noubus *******\n"
 
 cp "./nginx-ssl-util-noubus" "${TMPROOT}/usr/bin/nginx-util"

@@ -121,14 +121,19 @@ setpoint_add_ssl() {
     [ "${name}" = "${LAN_NAME}" ] && default=".default"
     local prefix="${CONF_DIR}${name}"
 
-    local CONF
-    CONF="$(grep -vE "$(_regex "${NGX_INCLUDE}" "${LAN_LISTEN}${default}")" \
-            "${prefix}.sans" 2>/dev/null)"
     local ADDS=""
-    echo "${CONF}" \
-        | grep -qE "$(_regex "${NGX_INCLUDE}" "${LAN_SSL_LISTEN}${default}")" \
-    || ADDS="${ADDS}${indent}$(_sed_rhs "${NGX_INCLUDE}" \
-        "${LAN_SSL_LISTEN}${default}")"
+    local CONF
+    CONF="$(sed -E \
+        -e "s/$(_regex "${NGX_INCLUDE}" "${LAN_LISTEN}${default}")/$1$(\
+                _sed_rhs "${NGX_INCLUDE}" "${LAN_SSL_LISTEN}${default}")/g" \
+        -e "s/^(\s*listen\s+)([^:]*:|\[[^]]*\]:)?80(\s|$|;)/\1\2443 ssl\3/g" \
+            "${prefix}.sans" 2>/dev/null)"
+#     CONF="$(grep -vE "$(_regex "${NGX_INCLUDE}" "${LAN_LISTEN}${default}")" \
+#             "${prefix}.sans" 2>/dev/null)"
+#     echo "${CONF}" \
+#         | grep -qE "$(_regex "${NGX_INCLUDE}" "${LAN_SSL_LISTEN}${default}")" \
+#     || ADDS="${ADDS}${indent}$(_sed_rhs "${NGX_INCLUDE}" \
+#         "${LAN_SSL_LISTEN}${default}")"
     echo "${CONF}" | grep -qE "$(_regex "${NGX_SSL_CRT}" "${prefix}")" \
     || ADDS="${ADDS}${indent}$(_sed_rhs "${NGX_SSL_CRT}" "${prefix}")"
     echo "${CONF}" | grep -qE "$(_regex "${NGX_SSL_KEY}" "${prefix}")" \
@@ -243,6 +248,24 @@ server {
 EOF
 CONFS="${CONFS} minimal:0"
 
+cat > listens.sans <<EOF
+server {
+    listen 80;
+    listen 81;
+    listen hostname:80;
+    listen hostname:81;
+    listen [::]:80;
+    listen [::]:81;
+    listen 1.3:80;
+#    listen 1.3:80;
+    listen 1.3:81;
+    listen [1::3]:80;
+    listen [1::3]:81;
+    server_name listens;
+}
+EOF
+CONFS="${CONFS} listens:0"
+
 cat > normal.sans <<EOF
 server {
     include '${LAN_LISTEN}';
@@ -266,6 +289,9 @@ CONFS="${CONFS} more_server:0"
 cat > more_names.sans <<EOF
 server {
     include '${LAN_LISTEN}';
+    include '${LAN_LISTEN}';
+    include '${LAN_LISTEN}';
+    not include '${LAN_LISTEN}';
     server_name example.com more_names example.org;
 }
 EOF
@@ -474,8 +500,6 @@ test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
 
 
 [ "$PRINT_PASSED" -gt 0 ] && printf '\n\t-"-\t(legacy) ... \n'
-
-sed -i "/server {/a\\    include '${LAN_LISTEN}';" minimal.sans
 
 for conf in ${CONFS}; do
     name="${conf%:*}"
