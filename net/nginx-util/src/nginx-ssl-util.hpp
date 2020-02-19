@@ -1,8 +1,6 @@
 #ifndef __NGINX_SSL_UTIL_HPP
 #define __NGINX_SSL_UTIL_HPP
 
-#include <thread>
-
 #ifdef NO_PCRE
 #include <regex>
 namespace rgx = std;
@@ -24,7 +22,7 @@ static constexpr auto CRON_INTERVAL = std::string_view{"3 3 12 12 *"};
 static constexpr auto LAN_SSL_LISTEN =
     std::string_view{"/var/lib/nginx/lan_ssl.listen"};
 
-static constexpr auto LAN_SSL_LISTEN_DEFAULT =
+static constexpr auto LAN_SSL_LISTEN_DEFAULT = //TODO(pst) deprecate
     std::string_view{"/var/lib/nginx/lan_ssl.listen.default"};
 
 static constexpr auto ADD_SSL_FCT = std::string_view{"add_ssl"};
@@ -79,28 +77,44 @@ auto get_if_missed(const std::string & conf, const Line & LINE,
 
 
 auto delete_if(const std::string & conf, const rgx::regex & rgx,
-               const std::string & val="", bool compare=false)
+               const std::string & val="")
     -> std::string;
 
 
-void add_ssl_directives_to(const std::string & name, bool isdefault);
+auto check_ssl_certificate(const std::string & crtpath,
+                           const std::string & keypath) -> bool;
 
 
-void create_ssl_certificate(const std::string & crtpath,
-                            const std::string & keypath,
-                            int days=792);
-
-
-void use_cron_to_recreate_certificate(const std::string & name);
+void install_cron_job(const Line & CRON_LINE, const std::string & name="");
 
 
 void add_ssl_if_needed(const std::string & name);
 
 
-void del_ssl_directives_from(const std::string & name, bool isdefault);
+void remove_cron_job(const Line & CRON_LINE, const std::string & name="");
+
+
+auto del_ssl_legacy(const std::string & name) -> bool;
 
 
 void del_ssl(const std::string & name);
+
+
+auto check_ssl(const uci::package & pkg, bool is_enabled) -> bool;
+
+
+inline void check_ssl(const uci::package & pkg)
+{
+    if (!check_ssl(pkg, is_enabled(pkg))) {
+#ifndef NO_UBUS
+        if (ubus::call("service", "list", UBUS_TIMEOUT).filter("nginx"))
+        {
+            call("/etc/init.d/nginx", "reload");
+            std::cerr<<"Reload Nginx.\n";
+        }
+#endif
+    }
+}
 
 
 constexpr auto _begin = _Line{
@@ -191,6 +205,8 @@ constexpr auto _escape = _Line{
 };
 
 
+constexpr std::string_view _check_ssl = "check_ssl";
+
 constexpr std::string_view _server_name = "server_name";
 
 constexpr std::string_view _include = "include";
@@ -210,9 +226,12 @@ constexpr std::string_view _ssl_session_timeout = "ssl_session_timeout";
 //   https://p99.gforge.inria.fr/p99-html/group__preprocessor__for.html
 // * Use constexpr---not available for strings or char * for now---look at lib.
 
+static const auto CRON_CHECK = Line::build
+    <_space, _escape<NGINX_UTIL>, _space, _escape<_check_ssl,'\''>, _newline>();
+
 static const auto CRON_CMD = Line::build
-    < _space, _escape<NGINX_UTIL>, _space, _escape<ADD_SSL_FCT,'\''>, _space,
-        _capture<>, _newline >();
+    <_space, _escape<NGINX_UTIL>, _space, _escape<ADD_SSL_FCT,'\''>, _space,
+        _capture<>, _newline>();
 
 static const auto NGX_SERVER_NAME =
     Line::build<_begin, _escape<_server_name>, _space, _capture<';'>, _end>();
@@ -221,15 +240,15 @@ static const auto NGX_INCLUDE_LAN_LISTEN = Line::build
     <_begin, _escape<_include>, _space, _escape<LAN_LISTEN,'\''>, _end>();
 
 static const auto NGX_INCLUDE_LAN_LISTEN_DEFAULT = Line::build
-    < _begin, _escape<_include>, _space,
-        _escape<LAN_LISTEN_DEFAULT, '\''>, _end >();
+    <_begin, _escape<_include>, _space,
+        _escape<LAN_LISTEN_DEFAULT, '\''>, _end>();
 
 static const auto NGX_INCLUDE_LAN_SSL_LISTEN = Line::build
     <_begin, _escape<_include>, _space, _escape<LAN_SSL_LISTEN, '\''>, _end>();
 
 static const auto NGX_INCLUDE_LAN_SSL_LISTEN_DEFAULT = Line::build
-    < _begin, _escape<_include>, _space,
-        _escape<LAN_SSL_LISTEN_DEFAULT, '\''>, _end >();
+    <_begin, _escape<_include>, _space,
+        _escape<LAN_SSL_LISTEN_DEFAULT, '\''>, _end>();
 
 static const auto NGX_SSL_CRT = Line::build
     <_begin, _escape<_ssl_certificate>, _space, _capture<';'>, _end>();
@@ -242,6 +261,10 @@ static const auto NGX_SSL_SESSION_CACHE = Line::build
 
 static const auto NGX_SSL_SESSION_TIMEOUT = Line::build
     <_begin, _escape<_ssl_session_timeout>, _space, _capture<';'>, _end>();
+
+
+
+// ------------------------- implementation: ----------------------------------
 
 
 auto get_if_missed(const std::string & conf, const Line & LINE,
@@ -271,7 +294,7 @@ auto get_if_missed(const std::string & conf, const Line & LINE,
 
 
 auto delete_if(const std::string & conf, const rgx::regex & rgx,
-               const std::string & val, const bool compare)
+               const std::string & val)
     -> std::string
 {
     std::string ret{};
@@ -282,7 +305,8 @@ auto delete_if(const std::string & conf, const rgx::regex & rgx,
          pos += match.position(0) + match.length(0))
     {
         const std::string value = match.str(match.size() - 1);
-        auto len = match.position(1);
+        auto len = match.position( match.size()>1 ? 1 : 0 );
+        bool compare = !val.empty();
         if (compare && value!=val && value!="'"+val+"'" && value!='"'+val+'"') {
             len = match.position(0) + match.length(0);
         }
@@ -294,7 +318,7 @@ auto delete_if(const std::string & conf, const rgx::regex & rgx,
 }
 
 
-void add_ssl_directives_to(const std::string & name, const bool isdefault)
+inline void add_ssl_directives_to(const std::string & name, const bool isdefault)
 {
     const std::string prefix = std::string{CONF_DIR} + name;
 
@@ -306,7 +330,7 @@ void add_ssl_directives_to(const std::string & name, const bool isdefault)
         rgx::regex_search(pos, const_conf.end(), match, NGX_SERVER_NAME.RGX());
         pos += match.position(0) + match.length(0))
     {
-        if (match.str(2).find(name) == std::string::npos) { continue; }
+        if (match.str(2).find(name) == std::string::npos) { continue; } //else:
 
         const std::string indent = match.str(1);
 
@@ -346,7 +370,7 @@ void add_ssl_directives_to(const std::string & name, const bool isdefault)
     auto errmsg = std::string{"add_ssl_directives_to error: "};
     errmsg += "cannot add SSL directives to " + name + ".conf, missing: ";
     errmsg += NGX_SERVER_NAME.STR(name, "\n    ") + "\n";
-    throw std::runtime_error(errmsg.c_str());
+    throw std::runtime_error(errmsg);
 }
 
 
@@ -392,19 +416,17 @@ inline auto get_nonce(const T salt=0) -> T
 }
 
 
-void create_ssl_certificate(const std::string & crtpath,
-                            const std::string & keypath,
-                            const int days)
+inline void create_ssl_certificate(const std::string & crtpath,
+                                   const std::string & keypath,
+                                   const int days=792)
 {
     size_t nonce = 0;
 
     try { nonce = get_nonce(nonce); }
 
     catch (...) { // the address of a variable should be random enough:
-        auto addr = &crtpath;
-        auto addrptr = static_cast<const size_t *>(
-                        static_cast<const void *>(&addr) );
-        nonce += *addrptr;
+        //NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast) sic:
+        nonce += reinterpret_cast<size_t>(&crtpath);
     }
 
     auto noncestr = num2hex(nonce);
@@ -455,49 +477,34 @@ void create_ssl_certificate(const std::string & crtpath,
         perror(errmsg.c_str());
     }
 
+    std::cerr<<"Created self-signed SSL certificate '"<<crtpath;
+    std::cerr<<"' with key '"<<keypath<<"'.\n";
 }
 
 
-void use_cron_to_recreate_certificate(const std::string & name)
+auto check_ssl_certificate(const std::string & crtpath,
+                           const std::string & keypath) -> bool
 {
-    static const char * filename = "/etc/crontabs/root";
-
-    std::string conf{};
-    try { conf = read_file(filename); }
-    catch (const std::ifstream::failure &) { /* is ok if not found, create. */ }
-
-    const std::string add = get_if_missed(conf, CRON_CMD, name);
-
-    if (add.length() > 0) {
-#ifndef NO_UBUS
-        auto service = ubus::call("service","list",UBUS_TIMEOUT).filter("cron");
-
-        if (!service) {
-            std::string errmsg{"use_cron_to_recreate_certificate error: "};
-            errmsg += "Cron unavailable to re-create the ssl certificate for ";
-            errmsg += name + "\n";
-            throw std::runtime_error(errmsg.c_str());
-        } // else active with or without instances:
-#endif
-
-        write_file(filename, std::string{CRON_INTERVAL}+add, std::ios::app);
-
-#ifndef NO_UBUS
-        call("/etc/init.d/cron", "reload");
-#endif
-
-        std::cerr<<"Rebuild the ssl certificate for '";
-        std::cerr<<name<<"' annually with cron."<<std::endl;
+    { // paths are relative to dir:
+        auto dir = std::string_view{"/etc/nginx"};
+        auto crt_rel = crtpath[0]!='/';
+        auto key_rel = keypath[0]!='/';
+        if ( (crt_rel || key_rel) && (chdir(dir.data()) != 0) )
+        {
+            auto errmsg = std::string{"check_ssl_certificate error: entering "};
+            errmsg += dir;
+            perror(errmsg.c_str());
+            errmsg += " (need to change directory since the given ";
+            errmsg += crt_rel ? "ssl_certificate '"+crtpath : std::string{};
+            errmsg += crt_rel&&key_rel ? "' and " : "";
+            errmsg += key_rel ? "ssl_certificate_key '"+keypath : std::string{};
+            errmsg += crt_rel&&key_rel ? "' are" : "' is a";
+            errmsg += " relative path";
+            errmsg += crt_rel&&key_rel ? "s)" : ")";
+            throw std::runtime_error(errmsg);
+        }
     }
-}
 
-
-void add_ssl_if_needed(const std::string & name)
-{
-    add_ssl_directives_to(name, name==LAN_NAME); // let it throw.
-
-    const auto crtpath = std::string{CONF_DIR} + name + ".crt";
-    const auto keypath = std::string{CONF_DIR} + name + ".key";
     constexpr auto remaining_seconds = (365 + 32)*24*60*60;
     constexpr auto validity_days = 3*(365 + 31);
 
@@ -527,15 +534,188 @@ void add_ssl_if_needed(const std::string & name)
 
     if (!is_valid) { create_ssl_certificate(crtpath, keypath, validity_days); }
 
-    try { use_cron_to_recreate_certificate(name); }
-    catch (...) {
-        std::cerr<<"add_ssl_if_needed warning: ";
-        std::cerr<<"cannot use cron to rebuild certificate for "<<name<<"\n";
+    return is_valid;
+}
+
+
+inline auto add_ssl_to_config(const std::string & name)
+{
+    auto pkg = uci::package{"nginx"}; // let it throw.
+
+    if (!is_enabled(pkg)) {
+        auto errmsg = std::string{"add_ssl error: neither there is a file '"};
+        errmsg += std::string{CONF_DIR} + name + ".conf' nor is UCI config ";
+        errmsg += "activated by:\n\tuci set nginx.global.uci_enable=true";
+        throw std::runtime_error(errmsg);
+    }
+
+    auto sec = pkg[name]; // let it throw.
+
+    struct { std::string crt; std::string key; } ret;
+
+    std::cerr<<"Adding SSL directives to UCI server 'nginx."<<name<<"':\n";
+
+    auto cache = false;
+    auto timeout = false;
+    for (auto opt : sec) {
+
+        if (opt.name()=="ssl_session_cache") { cache = true; continue; } //else:
+
+        if (opt.name()=="ssl_session_timeout") { timeout=true; continue; }
+
+        //else:
+        for (auto itm : opt) {
+
+            if (opt.name()=="ssl_certificate_key") { ret.key = itm.name(); }
+
+            else if (opt.name()=="ssl_certificate") { ret.crt = itm.name(); }
+
+            else if (opt.name()=="listen" || opt.name()==LISTEN_LOCALLY) {
+                static const auto rgx_port =
+                    rgx::regex{R"(^\s*([^:]*:|\[[^]]*\]:)?80(\s|$|;))"};
+                auto val = regex_replace(itm.name(), rgx_port, "$01443 ssl$2");
+                if (val!=itm.name()) {
+                    std::cerr<<"\t"<<opt.name()<<"='"<<val<<"' (replacing)\n";
+                    itm.rename(val.c_str());
+                }
+            }
+        }
+    }
+
+    std::cerr<<"\t"<<MANAGE_SSL<<"='self-signed'\n";
+    sec.set(MANAGE_SSL.data(), "self-signed");
+
+    if (ret.crt.empty()) {
+        ret.crt = std::string{CONF_DIR} + name + ".crt";
+        std::cerr<<"\tssl_certificate='"<<ret.crt<<"'\n";
+        sec.set("ssl_certificate", ret.crt.c_str());
+    }
+
+    if (ret.key.empty()) {
+        ret.key = std::string{CONF_DIR} + name + ".key";
+        std::cerr<<"\tssl_certificate_key='"<<ret.key<<"'\n";
+        sec.set("ssl_certificate_key", ret.key.c_str());
+    }
+
+    if (!cache) {
+        std::cerr<<"\tssl_session_cache='"<<SSL_SESSION_CACHE_ARG(name)<<"'\n";
+        sec.set("ssl_session_cache", SSL_SESSION_CACHE_ARG(name).data());
+    }
+
+    if (!timeout) {
+        std::cerr<<"\tssl_session_timeout='"<<SSL_SESSION_TIMEOUT_ARG<<"'\n";
+        sec.set("ssl_session_timeout", SSL_SESSION_TIMEOUT_ARG.data());
+    }
+
+    sec.commit();
+
+    return ret;
+}
+
+
+void install_cron_job(const Line & CRON_LINE, const std::string & name)
+{
+    static const char * filename = "/etc/crontabs/root";
+
+    std::string conf{};
+    try { conf = read_file(filename); }
+    catch (const std::ifstream::failure &) { /* is ok if not found, create. */ }
+
+    const std::string add = get_if_missed(conf, CRON_LINE, name);
+
+    if (add.length() > 0) {
+#ifndef NO_UBUS
+        if (!ubus::call("service", "list", UBUS_TIMEOUT).filter("cron")) {
+            std::string errmsg{"install_cron_job error: "};
+            errmsg += "Cron unavailable to re-create the ssl certificate";
+            errmsg += (name.empty() ? std::string{"s\n"} : " for '"+name+"'\n");
+            throw std::runtime_error(errmsg);
+        } //else active with or without instances:
+#endif
+
+        auto pre = (conf.length()==0 || conf.back()=='\n' ? "" : "\n");
+        write_file(filename, pre+std::string{CRON_INTERVAL}+add, std::ios::app);
+
+#ifndef NO_UBUS
+        call("/etc/init.d/cron", "reload");
+#endif
+
+        std::cerr<<"Rebuild the self-signed SSL certificate";
+        std::cerr<<(name.empty() ? std::string{"s"} : " for '"+name+"'");
+        std::cerr<<" annually with cron."<<std::endl;
     }
 }
 
 
-void del_ssl_directives_from(const std::string & name, const bool isdefault)
+void add_ssl_if_needed(const std::string & name)
+{
+    const auto legacypath = std::string{CONF_DIR} + name + ".conf";
+    if (access(legacypath.c_str(), R_OK)==0) {
+        add_ssl_directives_to(name, name==LAN_NAME); // let it throw.
+
+        const auto crtpath = std::string{CONF_DIR} + name + ".crt";
+        const auto keypath = std::string{CONF_DIR} + name + ".key";
+        check_ssl_certificate(crtpath, keypath); // let it throw.
+
+        try { install_cron_job(CRON_CMD, name); }
+        catch (...) {
+            std::cerr<<"add_ssl_if_needed warning: cannot use cron to rebuild ";
+            std::cerr<<"the self-signed SSL certificate for "<<name<<"\n";
+        }
+        return;
+    } //else:
+
+    auto paths = add_ssl_to_config(name); // let it throw.
+
+    check_ssl_certificate(paths.crt, paths.key); // let it throw.
+
+    try { install_cron_job(CRON_CHECK); }
+    catch (...) {
+        std::cerr<<"add_ssl_if_needed warning: cannot use cron to rebuild ";
+        std::cerr<<"the self-signed SSL certificates.\n";
+    }
+}
+
+
+void remove_cron_job(const Line & CRON_LINE, const std::string & name)
+{
+    static const char * filename = "/etc/crontabs/root";
+
+    const auto const_conf = read_file(filename);
+
+    bool changed = false;
+    auto conf = std::string{};
+
+    size_t prev = 0;
+    size_t curr = 0;
+    while ((curr=const_conf.find('\n', prev)) != std::string::npos) {
+
+        auto line = const_conf.substr(prev, curr-prev+1);
+
+        if (line==delete_if(line, CRON_LINE.RGX(), name)) {
+            conf += line;
+        } else { changed = true; }
+
+        prev = curr + 1;
+    }
+
+    if (changed) {
+        write_file(filename, conf);
+
+        std::cerr<<"Do not rebuild the self-signed SSL certificate";
+        std::cerr<<(name.empty() ? std::string{"s"} : " for '"+name+"'");
+        std::cerr<<" annually with cron anymore."<<std::endl;
+
+#ifndef NO_UBUS
+        if (ubus::call("service", "list", UBUS_TIMEOUT).filter("cron"))
+        { call("/etc/init.d/cron", "reload"); }
+#endif
+    }
+}
+
+
+inline void del_ssl_directives_from(const std::string & name,
+                                    const bool isdefault)
 {
     const std::string prefix = std::string{CONF_DIR} + name;
 
@@ -566,10 +746,10 @@ void del_ssl_directives_from(const std::string & name, const bool isdefault)
                 : delete_if(conf, NGX_INCLUDE_LAN_SSL_LISTEN.RGX());
 
             const auto crtpath = prefix+".crt";
-            conf = delete_if(conf, NGX_SSL_CRT.RGX(), crtpath, true);
+            conf = delete_if(conf, NGX_SSL_CRT.RGX(), crtpath);
 
             const auto keypath = prefix+".key";
-            conf = delete_if(conf, NGX_SSL_KEY.RGX(), keypath, true);
+            conf = delete_if(conf, NGX_SSL_KEY.RGX(), keypath);
 
             conf = delete_if(conf, NGX_SSL_SESSION_CACHE.RGX());
 
@@ -586,48 +766,83 @@ void del_ssl_directives_from(const std::string & name, const bool isdefault)
     auto errmsg = std::string{"del_ssl_directives_from error: "};
     errmsg += "cannot delete SSL directives from " + name + ".conf, missing: ";
     errmsg += NGX_SERVER_NAME.STR(name, "\n    ") + "\n";
-    throw std::runtime_error(errmsg.c_str());
+    throw std::runtime_error(errmsg);
 }
 
 
-void del_ssl(const std::string & name)
+inline auto del_ssl_from_config(const std::string & name)
 {
-    static const char * filename = "/etc/crontabs/root";
+    auto pkg = uci::package{"nginx"}; // let it throw.
 
-    try {
-        const auto const_conf = read_file(filename);
+    if (!is_enabled(pkg)) {
+        auto errmsg = std::string{"del_ssl error: neither there is a file '"};
+        errmsg += std::string{CONF_DIR} + name + ".conf' nor is UCI config ";
+        errmsg += "activated by:\n\tuci set nginx.global.uci_enable=true";
+        throw std::runtime_error(errmsg);
+    }
 
-        bool changed = false;
-        auto conf = std::string{};
+    auto sec = pkg[name]; // let it throw.
 
-        size_t prev = 0;
-        size_t curr = 0;
-        while ((curr=const_conf.find('\n', prev)) != std::string::npos) {
+    struct { std::string crt; std::string key; } ret;
 
-            auto line = const_conf.substr(prev, curr-prev+1);
+    std::cerr<<"Deleting SSL directives from UCI server 'nginx."<<name<<"':\n";
 
-            if (line==delete_if(line,CRON_CMD.RGX(),std::string{name},true)) {
-                conf += line;
-            } else { changed = true; }
+    auto manage = false;
+    for (auto opt : sec) {
 
-            prev = curr + 1;
+        for (auto itm : opt) {
+
+            if (opt.name()=="ssl_certificate_key") { ret.key = itm.name(); }
+
+            else if (opt.name()=="ssl_certificate") { ret.crt = itm.name(); }
+
+            else if ( opt.name()=="ssl_session_cache" ||
+                      opt.name()=="ssl_session_timeout" )
+            {}
+
+            else if (opt.name()==MANAGE_SSL && itm.name()=="self-signed")
+            { manage = true; }
+
+            else if (opt.name()=="listen" || opt.name()==LISTEN_LOCALLY) {
+                static const auto rgx_port = rgx::regex
+                    {R"(^\s*([^:]*:|\[[^]]*\]:)?443(\s.*)?\sssl(\s|$|;))"};
+                auto val = regex_replace(itm.name(), rgx_port, "$0180$2$3");
+                if (val!=itm.name()) {
+                    std::cerr<<"\t"<<opt.name()<<" (set back to '"<<val<<"')\n";
+                    itm.rename(val.c_str());
+                }
+                continue; /* not deleting opt, look at other itm : opt */
+            }
+
+            else { continue; /* not deleting opt, look at other itm : opt */ }
+
+            // Delete matching opt (not skipped by continue):
+            std::cerr<<"\t"<<opt.name()<<" (was '"<<itm.name()<<"')\n";
+            opt.del();
+            break;
         }
+    }
+    if (manage) {
+        sec.commit();
+        return ret;
+    } //else:
 
-        if (changed) {
-            write_file(filename, conf);
+    auto errmsg = std::string{"del_ssl error: not changing the config without"};
+    errmsg += ": uci set nginx."+name+"."+MANAGE_SSL.data()+"='self-signed'";
+    throw std::runtime_error(errmsg);
+}
 
-            std::cerr<<"Do not rebuild the ssl certificate for '";
-            std::cerr<<name<<"' annually with cron anymore."<<std::endl;
 
-#ifndef NO_UBUS
-            if (ubus::call("service", "list", UBUS_TIMEOUT).filter("cron"))
-            { call("/etc/init.d/cron", "reload"); }
-#endif
-        }
+auto del_ssl_legacy(const std::string & name) -> bool
+{
+    const auto legacypath = std::string{CONF_DIR} + name + ".conf";
 
-    } catch (...) {
-        std::cerr<<"del_ssl warning: ";
-        std::cerr<<"cannot delete cron job for "<<name<<" in "<<filename<<"\n";
+    if (access(legacypath.c_str(), R_OK)!=0) { return false; }
+
+    try { remove_cron_job(CRON_CMD, name); }
+    catch (...) {
+        std::cerr<<"del_ssl warning: cannot remove cron job rebuilding ";
+        std::cerr<<"the self-signed SSL certificate for "<<name<<"\n";
     }
 
     try { del_ssl_directives_from(name, name==LAN_NAME); }
@@ -637,19 +852,102 @@ void del_ssl(const std::string & name)
         throw;
     }
 
-    const auto crtpath = std::string{CONF_DIR} + name + ".crt";
+    return true;
+}
+
+
+void del_ssl(const std::string & name)
+{
+    auto crtpath = std::string{};
+    auto keypath = std::string{};
+
+    if (del_ssl_legacy(name)) { //let it throw.
+        crtpath = std::string{CONF_DIR} + name + ".crt";
+        keypath = std::string{CONF_DIR} + name + ".key";
+    }
+
+    else {
+        auto paths = del_ssl_from_config(name); //let it throw.
+        crtpath = paths.crt;
+        keypath = paths.key;
+    }
 
     if (remove(crtpath.c_str())!=0) {
         auto errmsg = "del_ssl warning: cannot remove "+crtpath;
         perror(errmsg.c_str());
     }
 
-    const auto keypath = std::string{CONF_DIR} + name + ".key";
-
     if (remove(keypath.c_str())!=0) {
         auto errmsg = "del_ssl warning: cannot remove "+keypath;
         perror(errmsg.c_str());
     }
+}
+
+
+auto check_ssl(const uci::package & pkg, bool is_enabled) -> bool
+{
+    auto are_valid = true;
+    auto is_enabled_and_at_least_one_has_manage_ssl = false;
+
+    if (is_enabled) {
+        for (auto sec : pkg) {
+            if (sec.anonymous() || sec.type()!="server") { continue; } //else:
+
+            const auto legacypath = std::string{CONF_DIR}+sec.name()+".conf";
+            if (access(legacypath.c_str(), R_OK)==0) { continue; } //else:
+
+            auto keypath = std::string{};
+            auto crtpath = std::string{};
+            auto self_signed = false;
+
+            for (auto opt : sec) {
+                for (auto itm : opt) {
+
+                    if (opt.name()=="ssl_certificate_key")
+                    { keypath = itm.name(); }
+
+                    else if (opt.name()=="ssl_certificate")
+                    { crtpath = itm.name();}
+
+                    else if (opt.name()==MANAGE_SSL) {
+                        if (itm.name()=="self-signed") { self_signed = true; }
+
+                        // else if (itm.name()=="???") { /* manage other */ }
+
+                        else { continue; } // no supported manage_ssl string.
+
+                        is_enabled_and_at_least_one_has_manage_ssl = true;
+                    }
+                }
+            }
+
+            if (self_signed && !crtpath.empty() && !keypath.empty()) {
+                try {
+                    if (!check_ssl_certificate(crtpath, keypath))
+                    { are_valid = false; }
+                }
+                catch (...) {
+                    std::cerr<<"check_ssl warning: cannot build certificate '";
+                    std::cerr<<crtpath<<"' or key '"<<keypath<<"'.\n";
+                }
+            }
+        }
+    }
+
+    auto suffix = std::string_view
+        {" the cron job checking the managed SSL certificates.\n"};
+
+    if (is_enabled_and_at_least_one_has_manage_ssl) {
+        try { install_cron_job(CRON_CHECK); }
+        catch (...) { std::cerr<<"check_ssl warning: cannot install"<<suffix; }
+    }
+
+    else if(access("/etc/crontabs/root", R_OK) == 0) {
+        try { remove_cron_job(CRON_CHECK); }
+        catch (...) { std::cerr<<"check_ssl warning: cannot remove"<<suffix; }
+    } //else: do nothing
+
+    return are_valid;
 }
 
 
