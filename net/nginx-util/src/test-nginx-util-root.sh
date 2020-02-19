@@ -1,8 +1,59 @@
-#!/bin/bash
+#!/bin/sh
 
 PRINT_PASSED=2
 
 NGINX_UTIL="/usr/bin/nginx-util"
+
+ORIG=".original-test-nginx-util-root"
+
+mkdir -p /tmp/.uci/
+
+uci commit nginx || { printf "Error invoking: uci commit\n Exit."; exit 2; }
+
+
+pst_exit() {
+    printf "\nExit: Recovering original settings ... "
+
+    uci revert nginx
+
+    cd "/etc/config/" && rm "nginx" && mv "nginx.${ORIG}" "nginx" ||
+    printf "\n%s: not moved %s to %s\n" "/etc/config/" "nginx${ORIG}" "nginx"
+
+    cd "/etc/crontabs/" && rm "root" && mv "root${ORIG}" "root" ||
+    printf "\n%s: not moved %s to %s\n" "/etc/crontabs/" "root${ORIG}" "root"
+
+    cd "$(dirname "${CONF_DIR}")" && rm -r "${CONF_DIR}" &&
+    mv "$(basename "${CONF_DIR}")${ORIG}" "$(basename "${CONF_DIR}")" ||
+    printf "\n%s: not moved %s to %s\n" "$(dirname "${CONF_DIR}")" \
+        "$(basename "${CONF_DIR}")${ORIG}" "$(basename "${CONF_DIR}")"
+
+    printf "done.\n"
+
+    exit "$1"
+}
+
+
+mkdir -p "/etc/config/" && touch "/etc/config/nginx"
+
+cd "/etc/config/" && [ ! -e "nginx${ORIG}" ] && cp "nginx" "nginx.${ORIG}" || {
+    printf "\n%s: not copied %s to %s\n" "/etc/config/" "nginx" "nginx${ORIG}"
+    pst_exit 3
+}
+
+uci set nginx.global.uci_enable=1
+
+
+mkdir -p "/etc/crontabs/" && touch "/etc/crontabs/root"
+
+cd "/etc/crontabs/" && [ ! -e "root${ORIG}" ] && mv "root" "root${ORIG}" || {
+    printf "\n%s: not moved %s to %s\n" "/etc/crontabs/" "root${ORIG}" "root"
+    pst_exit 4
+}
+
+touch "/etc/crontabs/root"
+
+
+# ----------------------------------------------------------------------------
 
 __esc_newlines() {
     echo "${1}" | sed -E 's/$/\\n/' | tr -d '\n' | sed -E 's/\\n$/\n/'
@@ -33,15 +84,46 @@ _echo_sed() {
     echo "" | sed -E "c${1}"
 }
 
+
+fileauto="# This file is re-created when Nginx starts or a local IP is changed."
+
+setpoint_init_lan() {
+    local r
+    r='/^\s*listen\s+([^1]|1[^2]|12[^7]).*:(80|443)\s+(\S*\s+)*default_server/d'
+    sed -i -E "${r}" "$(readlink "${UCI_CONF}")" >/dev/null
+
+    echo "${fileauto}"
+
+    sed -n -E '/^\s*#UCI_HTTP_CONFIG\s*$/q;p' "${UCI_CONF}.template"
+
+    local rhs="\t}\n\n\tserver { #see uci show 'nginx.\1'"
+    uci -n export nginx \
+    | sed -E -e "s/'//g" \
+        -e '/^\s*package\s+nginx\s*$/d' \
+        -e '/^\s*config\s+main\s/d' \
+        -e "s/^\s*config\s+server\s+(.*)$/$rhs/g" \
+        -e 's/^\s*list\s/\t\t/g' \
+        -e 's/^\s*option\s/\t\t/g' \
+        -e 's/^\s*uci_listen_locally\s+/\t\tlisten 127.0.0.1:/g' \
+        -e '/^\s*uci_/d' \
+        -e '/^$/d' -e "s/[^'\n]$/&;/g" \
+    | sed "1,2d"
+    printf "\t}\n\n"
+
+    sed -E '1,/^\s*#UCI_HTTP_CONFIG\s*$/ d' "${UCI_CONF}.template"
+}
+
+
 setpoint_add_ssl() {
     local indent="\n$1"
     local name="$2"
     local default=""
-    [ "${name}" == "${LAN_NAME}" ] && default=".default"
+    [ "${name}" = "${LAN_NAME}" ] && default=".default"
     local prefix="${CONF_DIR}${name}"
 
-    local CONF="$(grep -vE "$(_regex "${NGX_INCLUDE}" \
-        "${LAN_LISTEN}${default}")" "${prefix}.sans" 2>/dev/null)"
+    local CONF
+    CONF="$(grep -vE "$(_regex "${NGX_INCLUDE}" "${LAN_LISTEN}${default}")" \
+            "${prefix}.sans" 2>/dev/null)"
     local ADDS=""
     echo "${CONF}" \
         | grep -qE "$(_regex "${NGX_INCLUDE}" "${LAN_SSL_LISTEN}${default}")" \
@@ -74,23 +156,35 @@ setpoint_add_ssl() {
 
 # ----------------------------------------------------------------------------
 
+test_setpoint() {
+    [ "$(cat "$1")" = "$2" ] && return
+    echo "$1:"; cat "$1"
+    echo "differs from setpoint:"; echo "$2"
+    [ "${PRINT_PASSED}" -gt 1 ] && pst_exit 1
+}
 
-function test() {
-    eval "$1 2>/dev/null >/dev/null "
-    if [ $? -eq $2 ]
+
+test() {
+    eval "$1 2>/dev/null >/dev/null"
+    if [ "$?" -eq "$2" ]
     then
         [ "${PRINT_PASSED}" -gt 0 ] \
         && printf "%-72s%-1s\n" "$1" "2>/dev/null >/dev/null (-> $2?) passed."
     else
         printf "%-72s%-1s\n" "$1" "2>/dev/null >/dev/null (-> $2?) failed!!!"
-        [ "${PRINT_PASSED}" -gt 1 ] && exit 1
+        [ "${PRINT_PASSED}" -gt 0 ] && printf "\n### Snip:\n" && eval "$1"
+        [ "${PRINT_PASSED}" -gt 0 ] && printf "### Snap.\n"
+        [ "${PRINT_PASSED}" -gt 1 ] && pst_exit 1
     fi
 }
 
 
-[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting ${NGINX_UTIL} get_env ...\n"
+
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting %s get_env ...\n" "${NGINX_UTIL}"
+
 
 eval $("${NGINX_UTIL}" get_env)
+test '[ -n "${UCI_CONF}" ]' 0
 test '[ -n "${NGINX_CONF}" ]' 0
 test '[ -n "${CONF_DIR}" ]' 0
 test '[ -n "${LAN_NAME}" ]' 0
@@ -99,23 +193,39 @@ test '[ -n "${LAN_SSL_LISTEN}" ]' 0
 test '[ -n "${SSL_SESSION_CACHE_ARG}" ]' 0
 test '[ -n "${SSL_SESSION_TIMEOUT_ARG}" ]' 0
 test '[ -n "${ADD_SSL_FCT}" ]' 0
+test '[ -n "${MANAGE_SSL}" ]' 0
+test '[ -n "${LISTEN_LOCALLY}" ]' 0
+
+mkdir -p "$(dirname "${LAN_LISTEN}")"
+
+mkdir -p "${CONF_DIR}"
+
+cd "$(dirname "${CONF_DIR}")" && [ ! -e "$(basename "${CONF_DIR}")${ORIG}" ] &&
+mv "$(basename "${CONF_DIR}")" "$(basename "${CONF_DIR}")${ORIG}" ||
+{
+    printf "\n%s: not moved %s to %s\n" "$(dirname "${CONF_DIR}")" \
+        "$(basename "${CONF_DIR}")" "$(basename "${CONF_DIR}")${ORIG}"
+    pst_exit 3
+}
+
+mkdir -p "${CONF_DIR}"
 
 
-[ "$PRINT_PASSED" -gt 0 ] && printf "\nPrepare files in ${CONF_DIR} ...\n"
 
-mkdir -p ${CONF_DIR}
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nPrepare files in %s ...\n" "${CONF_DIR}"
 
-cd ${CONF_DIR}
+
+cd "${CONF_DIR}" || pst_exit 2
 
 NGX_INCLUDE="include '\$';"
 NGX_SERVER_NAME="server_name * '\$' *;"
 NGX_SSL_CRT="ssl_certificate '\$.crt';"
 NGX_SSL_KEY="ssl_certificate_key '\$.key';"
 NGX_SSL_SESSION_CACHE="ssl_session_cache '$(echo "${SSL_SESSION_CACHE_ARG}" \
-    | sed -E "s/$(__esc_regex ${LAN_NAME})/\$/")';"
+    | sed -E "s/$(__esc_regex "${LAN_NAME}")/\$/")';"
 NGX_SSL_SESSION_TIMEOUT="ssl_session_timeout '${SSL_SESSION_TIMEOUT_ARG}';"
 
-cat > ${LAN_NAME}.sans <<EOF
+cat > "${LAN_NAME}.sans" <<EOF
 # default_server for the LAN addresses getting the IPs by:
 # ifstatus lan | jsonfilter -e '@["ipv4-address","ipv6-address"].*.address'
 server {
@@ -196,56 +306,210 @@ EOF
 CONFS="${CONFS} tab:0"
 
 
-[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting ${NGINX_UTIL} init_lan ...\n"
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nSetup files in %s ...\n" "${CONF_DIR}"
 
-mkdir -p "$(dirname "${LAN_LISTEN}")"
-
-cp ${LAN_NAME}.sans ${LAN_NAME}.conf
-
-test '${NGINX_UTIL} init_lan' 0
-
-
-[ "$PRINT_PASSED" -gt 0 ] && printf "\nSetup files in ${CONF_DIR} ...\n"
 
 for conf in ${CONFS}
-do test 'setpoint_add_ssl "    " '${conf%:*} ${conf#*:}
+do test 'setpoint_add_ssl "    " '"${conf%:*}" "${conf#*:}"
 done
 
 test 'setpoint_add_ssl "\t" tab' 0 # fixes wrong indentation.
 
 
-[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting ${NGINX_UTIL} add_ssl ...\n"
+
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting Cron ... \n"
+
+
+echo -n "prefix" >"/etc/crontabs/root"
+test '"${NGINX_UTIL}" add_ssl _lan' 0
+echo "postfix" >>"/etc/crontabs/root"
+test_setpoint "/etc/crontabs/root" "prefix
+3 3 12 12 * ${NGINX_UTIL} 'check_ssl'
+postfix"
+
+test '"${NGINX_UTIL}" del_ssl _lan' 0
+test_setpoint "/etc/crontabs/root" "prefix
+3 3 12 12 * ${NGINX_UTIL} 'check_ssl'
+postfix"
+
+test '"${NGINX_UTIL}" check_ssl' 0
+test_setpoint "/etc/crontabs/root" "prefix
+postfix"
+
+test '"${NGINX_UTIL}" add_ssl _lan' 0
+test_setpoint "/etc/crontabs/root" "prefix
+postfix
+3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+
+rm -f "/etc/crontabs/root"
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf '\n\t-"-\t(legacy) ... \n'
+
+echo -n "prefix" >"/etc/crontabs/root"
+cp "minimal.sans" "minimal.conf"
+
+test '"${NGINX_UTIL}" add_ssl minimal' 0
+echo "postfix" >>"/etc/crontabs/root"
+test_setpoint "/etc/crontabs/root" "prefix
+3 3 12 12 * ${NGINX_UTIL} 'add_ssl' 'minimal'
+postfix"
+
+test '"${NGINX_UTIL}" del_ssl minimal' 0
+test_setpoint "/etc/crontabs/root" "prefix
+postfix"
+
+rm -f "/etc/crontabs/root"
+
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting %s init_lan ...\n" "${NGINX_UTIL}"
+
+
+rm -f "${LAN_NAME}.conf" "_redirect2ssl.conf" "${UCI_ADDED}.conf"
+rm -f "$(readlink "${UCI_CONF}")"
+
+test '"${NGINX_UTIL}" init_lan' 0
+test_setpoint "${UCI_CONF}" "$(setpoint_init_lan)"
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf '\n\t-"-\twith temporary UCI config ... \n'
+
+UCI_ADDED="$(uci add nginx server)" &&
+uci set nginx.@server[-1].server_name='temp' &&
+uci add_list nginx.@server[-1].listen='81 default_server' &&
+uci add_list nginx.@server[-1].listen='80' &&
+echo "UCI: nginx.${UCI_ADDED} added."
+
+rm -f "${LAN_NAME}.conf" "_redirect2ssl.conf" "${UCI_ADDED}.conf"
+rm -f "$(readlink "${UCI_CONF}")"
+
+test '"${NGINX_UTIL}" init_lan' 0
+test_setpoint "${UCI_CONF}" "$(setpoint_init_lan)"
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf '\n\t-"-\t(legacy) ... \n'
+
+cp "${LAN_NAME}.sans" "${LAN_NAME}.conf"
+touch "_redirect2ssl.conf" "${UCI_ADDED}.conf"
+rm -f "$(readlink "${UCI_CONF}")"
+test '"${NGINX_UTIL}" init_lan' 0
+
+skipped() {
+    printf "\t# skipped UCI server 'nginx.%s'" "$1"
+    printf " as it could conflict with: %s%s.conf\n\n" "${CONF_DIR}" "$1"
+}
+rhs="$(skipped "$LAN_NAME" && skipped _redirect2ssl && skipped "${UCI_ADDED}")"
+sed -E -e "s/^\t#UCI_HTTP_CONFIG$/$(__esc_sed_rhs "$rhs")\n/" \
+    -e 's/\\n/\n/g' -e "1i${fileauto}" "${UCI_CONF}.template" >"uci.setpoint"
+
+test_setpoint "${UCI_CONF}" "$(cat "uci.setpoint")"
+test_setpoint "/etc/crontabs/root" ""
+
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting %s add_ssl ...\n" "${NGINX_UTIL}"
+
+
+test '[ "${ADD_SSL_FCT}" = "add_ssl" ] ' 0
+
+rm -f "${LAN_NAME}.conf" "_redirect2ssl.conf" "${UCI_ADDED}.conf"
+rm -f "$(readlink "${UCI_CONF}")"
+test 'uci set nginx._lan.uci_manage_ssl="self-signed"' 0
+"${NGINX_UTIL}" del_ssl "${LAN_NAME}" 2>/dev/null
+test '"${NGINX_UTIL}" add_ssl '"${LAN_NAME}" 0
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+test '"${NGINX_UTIL}" add_ssl '"${LAN_NAME}" 0
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+test '"${NGINX_UTIL}" add_ssl '"${UCI_ADDED}" 0
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+test '"${NGINX_UTIL}" add_ssl inexistent' 1
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+test '"${NGINX_UTIL}" init_lan' 0
+test_setpoint "${UCI_CONF}" "$(setpoint_init_lan)"
+test_setpoint "/etc/crontabs/root" "3 3 12 12 * ${NGINX_UTIL} 'check_ssl'"
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf '\n\t-"-\t(legacy) ... \n'
 
 cp different_name.sans different_name.with
 
-test '[ "${ADD_SSL_FCT}" == "add_ssl" ] ' 0
-
+cp "/etc/crontabs/root" "cron.setpoint"
 for conf in ${CONFS}; do
-    name=${conf%:*}
-    cp ${name}.sans ${name}.conf
-    test '${NGINX_UTIL} add_ssl '${name} ${conf#*:}
-    (test '[ "$(cat '${name}'.conf)" == "$(cat '${name}'.with)" ]' 0 >/dev/null)
-    [ "$?" -gt 0 ] && {
-        echo "created ${name}.conf:"; cat "${name}.conf"
-        echo "differs from setpoint:"; cat "${name}.with"
-        exit 1
-    }
+    name="${conf%:*}"
+    [ "${name}" = "different_name" ] ||
+    echo "3 3 12 12 * ${NGINX_UTIL} 'add_ssl' '${name}'" >>"cron.setpoint"
+    cp "${name}.sans" "${name}.conf"
+    test '"${NGINX_UTIL}" add_ssl '"${name}" "${conf#*:}"
+    test_setpoint "${name}.conf" "$(cat "${name}.with")"
+    test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
 done
 
 
-[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting ${NGINX_UTIL} del_ssl ...\n"
+
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting %s del_ssl ...\n" "${NGINX_UTIL}"
+
+sed -E -e 's/443 ssl/80/' -e '/[^2]ssl/d' "/etc/config/nginx" >"config.setpoint"
+
+cp "/etc/crontabs/root" "cron.setpoint"
+rm -f "${LAN_NAME}.conf" "_redirect2ssl.conf" "${UCI_ADDED}.conf"
+test '"${NGINX_UTIL}" del_ssl '"${LAN_NAME}" 0
+test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
+test '"${NGINX_UTIL}" del_ssl '"${LAN_NAME}" 1
+test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
+test '"${NGINX_UTIL}" del_ssl '"${UCI_ADDED}" 0
+test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
+test '"${NGINX_UTIL}" del_ssl inexistent' 1
+test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
+
+test_setpoint "/etc/config/nginx" "$(cat "config.setpoint")"
+
+rm -f "$(readlink "${UCI_CONF}")"
+sed -E "/$(__esc_regex "'check_ssl'")/d" "/etc/crontabs/root" >"cron.setpoint"
+test '"${NGINX_UTIL}" init_lan' 0
+test_setpoint "${UCI_CONF}" "$(setpoint_init_lan)"
+test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf '\n\t-"-\t(legacy) ... \n'
 
 sed -i "/server {/a\\    include '${LAN_LISTEN}';" minimal.sans
 
 for conf in ${CONFS}; do
-    name=${conf%:*}
-    cp ${name}.with ${name}.conf
-    test '${NGINX_UTIL} del_ssl '${name} ${conf#*:}
-    (test '[ "$(cat '${name}'.conf)" == "$(cat '${name}'.sans)" ]' 0 >/dev/null)
-    [ "$?" -gt 0 ] && {
-        echo "created ${name}.conf:"; cat "${name}.conf"
-        echo "differs from setpoint:"; cat "${name}.sans"
-        exit 1
-    }
+    name="${conf%:*}"
+    sed -E "/$(__esc_regex "'${name}'")/d" "/etc/crontabs/root" >"cron.setpoint"
+    cp "${name}.with" "${name}.conf"
+    test '"${NGINX_UTIL}" del_ssl '"${name}" "${conf#*:}"
+    test_setpoint "${name}.conf" "$(cat "${name}.sans")"
+    test_setpoint "/etc/crontabs/root" "$(cat "cron.setpoint")"
 done
+test_setpoint "/etc/crontabs/root" ""
 
+
+
+[ "$PRINT_PASSED" -gt 0 ] && printf "\nTesting without UCI ... \n"
+
+
+rm -f "$(readlink "${UCI_CONF}")"
+
+test 'uci set nginx.global.uci_enable=0' 0
+
+test '"${NGINX_UTIL}" init_lan' 0
+
+test '[ -e "$(readlink '"${UCI_CONF}"')" ]' 1
+
+cp "${LAN_NAME}.sans" "${LAN_NAME}.conf"
+test '"${NGINX_UTIL}" add_ssl '"${LAN_NAME}" 0
+test '"${NGINX_UTIL}" add_ssl '"${LAN_NAME}" 0
+test '"${NGINX_UTIL}" del_ssl '"${LAN_NAME}" 0
+test '"${NGINX_UTIL}" del_ssl '"${LAN_NAME}" 0
+
+test 'rm "${LAN_NAME}.conf"' 0
+test '"${NGINX_UTIL}" add_ssl '"${LAN_NAME}" 1
+test '"${NGINX_UTIL}" del_ssl '"${LAN_NAME}" 1
+
+
+
+pst_exit 0

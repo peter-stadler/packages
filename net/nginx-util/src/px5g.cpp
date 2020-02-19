@@ -174,7 +174,7 @@ void eckey(const argv_view & argv)
             if (has_main_option) {
                 throw std::runtime_error
                     ("eckey error: more than one main option");
-            } // else:
+            } //else:
             has_main_option = true;
 
             curve = parse_curve(argv[i]);
@@ -223,7 +223,7 @@ void rsakey(const argv_view & argv)
 
             if (has_main_option) {
                 throw std::runtime_error("rsakey error: more than one keysize");
-            } // else:
+            } //else:
             has_main_option = true;
 
             try {
