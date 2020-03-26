@@ -1,0 +1,60 @@
+#!/bin/sh
+
+RECOVER="/add/.pst-recover"
+RECOVER_CMD="_pst_recover"
+
+pst_error() { [ "${VERBOSE}" -gt 0 ] && echo "pst-move error: $1" 1>&2; }
+
+pst_warn() { [ "${VERBOSE}" -gt 1 ] && echo "pst-move warning: $1" 1>&2; }
+
+pst_info() { [ "${VERBOSE}" -gt 2 ] && echo "pst-move info: $1" 1>&2; }
+
+
+VERBOSE=2
+[ "$1" = "-q" ] && shift && VERBOSE=0
+[ "$1" = "-v" ] && shift && VERBOSE=3
+
+[ "$#" -lt 1 ] && pst_error "syntax is 'pst-move [-v|-q] directory'
+    -v         verbose
+    -q         quiet
+    directory  /absolute/path or 'python'" && exit 1
+
+
+if [ "$1" = "python" ]
+then DIR="PYTHON3_PKG_DIR/.."
+else DIR="$1"
+fi
+DIR="$(readlink -f "${DIR}")"
+mkdir -p "${DIR}" 2>/dev/null
+
+
+pst_info "copying ${DIR} to /add${DIR} ..."
+
+[ "${DIR:0:1}" != "/" ] && pst_error "${DIR} is not an absolute path" && exit 1
+[ "${DIR:0:5}" = "/add/" ] && pst_error "${DIR} is already in /add" && exit 1
+[ ! -d "${DIR}" ] && pst_error "${DIR} is not a directory" && exit 1
+[ -e "/add${DIR}" ] && pst_error "/add${DIR} exists" && exit 1
+
+
+if mkdir -p "$(dirname "/add${DIR}")" && cp -Tap "${DIR}" "/add${DIR}"
+then
+    pst_info "removing ${DIR} ..."
+    
+    rm -rf "${DIR}" || 
+    { pst_error "cannot remove ${DIR} for linking /add${DIR} to it"; exit 1; }
+    
+    echo "${RECOVER_CMD} '${DIR}'" >>"${RECOVER}" ||
+    pst_warn "cannot append to ${RECOVER} the command: ${RECOVER_CMD} '${DIR}'"
+    
+    ln -s "/add${DIR}" "${DIR}" || 
+    { pst_error "cannot link /add${DIR} -> ${DIR}"; exit 1; }
+    
+    pst_info "done and linked: /add${DIR} -> ${DIR}"
+else
+    pst_error "cannot move ${DIR}, removing /add${DIR}"
+    rm -rf "/add${DIR}"
+    exit 1
+fi
+
+
+exit 0

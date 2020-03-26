@@ -1,0 +1,51 @@
+#!/bin/sh
+
+RECOVER="/add/.pst-recover"
+RECOVER_CMD="_pst_recover"
+
+uci -q get fstab.add && block mount && [ -e "${RECOVER}" ] && 
+/bin/sh "${RECOVER}" && echo "${RECOVER} done." && exit 0
+
+for DEV in /dev/sd*
+do
+    umount /add 2>/dev/null
+    mount "${DEV}" /add 2>/dev/null || continue
+    if [ -e "${RECOVER}" ] && /bin/sh "${RECOVER}" && echo "${RECOVER} done." ||
+        [ -z "$(ls -A /add)" ] && cat <<EOF >"${RECOVER}"
+#!/bin/sh        
+
+"${RECOVER_CMD}"() {
+    local DIR="\$1"
+    if [ -e "\${DIR}" ] && [ "\$(readlink -f "\${DIR}")" != "/add\${DIR}" ]
+    then echo "${RECOVER} warning: not linking to existing \${DIR}" 1>&2
+    else
+        mkdir -p "\$(dirname "\${DIR}")" &&
+        ln -s "/add\${DIR}" "\${DIR}" ||
+        echo "${RECOVER_CMD} warning: cannot link /add\${DIR} -> \${DIR}" 1>&2
+    fi
+}
+
+printf "\n${RECOVER_CMD}: Linking from /... to /add/...\n"
+EOF
+    then
+        UUID="$(block info "${DEV}" | sed -E 's/^.*\sUUID="([^"]*).*$/\1/')" &&
+        uci set fstab.add="mount" &&
+        uci set fstab.add.uuid="${UUID}" &&
+        uci set fstab.add.target="/add" &&
+        uci commit fstab &&
+        chmod +x "${RECOVER}" &&
+        echo "pst-setup-add done. Move directories to /add by:" &&
+        echo "    pst-move -v /usr/share/etesync-server" &&
+        echo "    pst-move -v /etc/nginx" &&
+        echo "    pst-move -v python" &&
+        exit 0
+        echo "pst-setup-add error: cannot create fstab.add for UUID=${UUID}."
+        exit 1
+    fi
+    umount /add 2>/dev/null
+done
+
+echo "pst-setup-add error: cannot find a mountable EMPTY partition at: /dev/sd*"
+exit 2
+
+

@@ -1,0 +1,51 @@
+#!/bin/sh
+
+_error() { echo "nsupdate.info error: $1" >&2; exit 1; }
+
+_warn() { echo "nsupdate.info warning: $1" >&2; }
+
+domain="${1:?usage: nsupdate.info domain secret}"
+
+pass="${2:?usage: nsupdate.info domain secret}"
+
+prot="https"
+
+setip6="ipv6.nsupdate.info/nic/update"
+getip6="ipv6.nsupdate.info/myip"
+myip6="$(uclient-fetch -6 -O - "${prot}://${getip6}" 2>/dev/null ||
+    _error "uclient-fetch -6 -O - ${prot}://${getip6}")"
+[ -n "${myip6}" ] ||
+_error "no IPv6 from: uclient-fetch -6 -O - ${prot}://${getip6}"
+
+nsip6="$(nslookup -querytype=AAAA "${domain}" ||
+    nslookup -querytype=AAAA "${domain}" 1.1 ||
+    _error "nslookup -querytype=AAAA ${domain}")"
+nsip6="${nsip6#*${domain}*has AAAA address }"
+[ "${nsip6}" != "${nsip6//[^0-9A-Fa-f:.]/}" ] &&
+_warn "no IPv6 from: nslookup -querytype=AAAA ${domain}"
+
+[ "${myip6}" != "${nsip6}" ] && {
+    echo "changing Ipv6 address for ${domain} to ${myip6} (from ${nsip6})"
+    uclient-fetch -6 -O - "${prot}://${domain}:${pass}@${setip6}" 2>/dev/null ||
+    _warn "uclient-fetch -6 -O - ${prot}://${domain}:***[secret]***@${setip6}"
+}
+
+setip4="ipv4.nsupdate.info/nic/update"
+getip4="ipv4.nsupdate.info/myip"
+myip4="$(uclient-fetch -4 -O - "${prot}://${getip4}" 2>/dev/null ||
+    _error "uclient-fetch -4 -O - ${prot}://${getip4}")"
+[ -n "${myip4}" ] ||
+_error "no IPv4 from: uclient-fetch -4 -O - ${prot}://${getip4}"
+
+nsip4="$(nslookup -querytype=A "${domain}" ||
+    nslookup -querytype=A "${domain}" 1.1 ||
+    _error "nslookup -querytype=A ${domain}")"
+nsip4="${nsip4#*Name:*${domain}*Address: }"
+[ "${nsip4}" != "${nsip4//[^0-9.]/}" ] &&
+_warn "no IPv4 from: nslookup -querytype=A ${domain}"
+
+[ "${myip4}" != "${nsip4}" ] && {
+    echo "changing Ipv4 address for ${domain} to ${myip4} (from ${nsip4})"
+    uclient-fetch -4 -O - "${prot}://${domain}:${pass}@${setip4}" 2>/dev/null ||
+    _warn "uclient-fetch -4 -O - ${prot}://${domain}:***[secret]***@${setip4}"
+}
