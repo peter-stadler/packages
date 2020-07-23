@@ -547,11 +547,15 @@ $(eval $(call BuildPackage,nginx-mod-luci))
 # It is for smoothly substituting nginx and nginx-mod-luci-ssl (by nginx-ssl
 # respectively nginx-mod-luci). Add above commented PROVIDES when removing.
 
-Package/nginx = $(Package/nginx-ssl)
+define Package/nginx
+  TITLE:=Dummy package for transition when upgrading.
+  DEPENDS:=+nginx-ssl
+  PKGARCH:=all
+endef
 
-Package/nginx/install = $(Package/nginx-ssl/install)
-
-Package/nginx/prerm = $(Package/nginx-ssl/prerm)
+define Package/nginx/install
+	$(INSTALL_DIR) $(1)/usr/bin
+endef
 
 $(eval $(call BuildPackage,nginx))
 
