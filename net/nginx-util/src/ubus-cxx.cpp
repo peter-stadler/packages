@@ -14,14 +14,14 @@ inline void example_for_checking_if_there_is_a_key()
 inline void example_for_getting_values()
 {
     auto lan_status = ubus::call("network.interface.lan", "status");
-    for (auto t : lan_status.filter("ipv6-address", "", "address")) {
+    for (const auto *t : lan_status.filter("ipv6-address", "", "address")) {
         //NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-        auto x = const_cast<blob_attr *>(t);
+        auto *x = const_cast<blob_attr *>(t);
         std::cout<<"["<<blobmsg_get_string(x)<<"] ";
     }
-    for (auto t : lan_status.filter("ipv4-address", "").filter("address")) {
+    for (const auto *t : lan_status.filter("ipv4-address", "").filter("address")) {
         //NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-        auto x = const_cast<blob_attr *>(t);
+        auto *x = const_cast<blob_attr *>(t);
         std::cout<<blobmsg_get_string(x)<<" ";
     }
     std::cout<<std::endl;
@@ -32,9 +32,9 @@ inline void example_for_sending_message()
 {
     auto set_arg = [](blob_buf * buf) -> int
         { return blobmsg_add_string(buf, "config", "nginx"); };
-    for (auto t : ubus::call("uci", "get", set_arg).filter("values")) {
+    for (const auto *t : ubus::call("uci", "get", set_arg).filter("values")) {
         //NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-        auto x = const_cast<blob_attr *>(t);
+        auto *x = const_cast<blob_attr *>(t);
         std::cout<<blobmsg_get_string(x)<<"\n";
     }
 }
@@ -43,9 +43,9 @@ inline void example_for_sending_message()
 inline void example_for_exploring()
 {
     ubus::strings keys{"ipv4-address", "", ""};
-    for (auto t : ubus::call("network.interface.lan", "status").filter(keys)) {
+    for (const auto *t : ubus::call("network.interface.lan", "status").filter(keys)) {
         //NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-        auto x = const_cast<blob_attr *>(t);
+        auto *x = const_cast<blob_attr *>(t);
         std::cout<<blobmsg_name(x)<<": ";
         switch (blob_id(x)) {
             case BLOBMSG_TYPE_UNSPEC: std::cout<<"[unspecified]"; break;
@@ -76,7 +76,7 @@ inline void example_for_recursive_exploring()
             bool first = true;
             for (; it!=end; ++it) {
                 //NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-                auto attr = const_cast<blob_attr *>(*it);
+                auto *attr = const_cast<blob_attr *>(*it);
                 if (first) { first = false; }
                 else { std::cout<<",\n"; }
                 std::cout<<std::string(depth, '\t');

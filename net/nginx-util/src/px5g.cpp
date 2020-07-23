@@ -1,6 +1,7 @@
 #include "px5g-openssl.hpp"
 #include <array>
 #include <iostream>
+#include <numeric>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -60,7 +61,7 @@ void selfsigned(const argv_view & argv);
 
 inline auto parse_int(const std::string_view & arg) -> int
 {
-    size_t pos;
+    size_t pos = 0;
     int ret = stoi(std::string{arg}, &pos);
     if (pos < arg.size()) {
         throw std::runtime_error("number has trailing char");
@@ -422,10 +423,13 @@ auto main(int argc, const char ** argv) -> int
 
     catch (const std::exception & e)  {
 
-        auto usage = std::string{"usage: \n"}  ;
-        for (auto cmd : cmds) {
-            usage += std::string{4, ' '} + *argv +" "+ cmd[0] + cmd[1] +"\n";
-        }
+        auto usage = std::accumulate(
+            cmds.begin(),
+            cmds.end(),
+            std::string{"usage: \n"},
+            [=](const auto &use, const auto &cmd)
+            { return use+ std::string{4, ' '} + *argv +" "+cmd[0]+cmd[1]+"\n"; }
+        );
 
         std::cerr<<usage<<std::flush;
 
