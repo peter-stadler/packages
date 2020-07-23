@@ -281,7 +281,7 @@ inline auto iterator::operator++() -> iterator &
         { //immmerge:
             ++i;
 
-            auto tmp = cur.release();
+            auto *tmp = cur.release();
 
             struct new_iterator : public iterator // use private constructor:
             { explicit new_iterator(iterator * par) : iterator{par} {} };
@@ -297,7 +297,7 @@ inline auto iterator::operator++() -> iterator &
                 { break; }
 
                 //emerge:
-                auto tmp = cur->parent;
+                auto *tmp = cur->parent;
 
                 if (tmp == nullptr) {
                     cur->pos = nullptr;
@@ -321,15 +321,15 @@ inline auto call(const char * path, const char * method, F set_arguments,
 
     auto shared = lock_shared_resources{};
 
-    auto ctx = shared.get_context();
+    auto *ctx = shared.get_context();
 
-    uint32_t id;
+    uint32_t id = 0;
     int err = ubus_lookup_id(ctx, path, &id);
 
     if (err==0) { // call
         ubus_request request{};
 
-        auto buf = shared.get_blob_buf();
+        auto *buf = shared.get_blob_buf();
         err = set_arguments(buf);
         if (err==0) {
             err = ubus_invoke_async(ctx, id, method, buf->head, &request);
@@ -350,7 +350,7 @@ inline auto call(const char * path, const char * method, F set_arguments,
             {
                 if (req==nullptr || msg==nullptr) { return; }
 
-                auto saved = static_cast<msg_ptr *>(req->priv);
+                auto *saved = static_cast<msg_ptr *>(req->priv);
                 if (saved==nullptr || *saved) { return; }
 
                 saved->reset(blob_memdup(msg), free);
