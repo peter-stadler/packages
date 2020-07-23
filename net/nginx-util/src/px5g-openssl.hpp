@@ -109,7 +109,7 @@ auto gen_eckey(const int curve) -> EVP_PKEY_ptr
 
     EC_GROUP_set_point_conversion_form(group, POINT_CONVERSION_UNCOMPRESSED);
 
-    auto eckey = EC_KEY_new();
+    auto *eckey = EC_KEY_new();
 
     if (eckey != nullptr) {
         if ( (EC_KEY_set_group(eckey, group) == 0) ||
@@ -152,7 +152,7 @@ auto gen_rsakey(const int keysize, const BN_ULONG exponent) -> EVP_PKEY_ptr
         errmsg += std::to_string(OPENSSL_RSA_MAX_MODULUS_BITS) + "]";
         throw std::runtime_error(errmsg);
     }
-    auto bignum = BN_new();
+    auto *bignum = BN_new();
 
     if (bignum == nullptr) {
         std::string errmsg{"gen_rsakey error: cannot get big number struct\n"};
@@ -160,7 +160,7 @@ auto gen_rsakey(const int keysize, const BN_ULONG exponent) -> EVP_PKEY_ptr
         throw std::runtime_error(errmsg);
     }
 
-    auto rsa = RSA_new();
+    auto *rsa = RSA_new();
 
     if (rsa != nullptr) {
         if ((BN_set_word(bignum, exponent) == 0) ||
@@ -212,11 +212,12 @@ void write_key(const EVP_PKEY_ptr & pkey,
         auto fd = creat(keypath.c_str(), mask); // the same without va_args.
 
         if (fd >= 0) {
-            auto fp = fdopen(fd, (use_pem ? "w" : "wb") );
+            auto *fp = fdopen(fd, (use_pem ? "w" : "wb") );
 
             if (fp != nullptr) {
                 bio = _BIO_new_fp(fp, use_pem, true);
-                if (bio == nullptr) { fclose(fp); } // (fp owns fd)
+                //NOLINTNEXTLINE(cppcoreguidelines-owning-memory) fp owns fd:
+                if (bio == nullptr) { fclose(fp); }
             }
             else { close(fd); }
         }
@@ -233,7 +234,7 @@ void write_key(const EVP_PKEY_ptr & pkey,
 
     int len = 0;
 
-    auto key = pkey.get();
+    auto *key = pkey.get();
     switch (EVP_PKEY_base_id(key)) { // use same format as px5g:
         case EVP_PKEY_EC:
             len = use_pem ?
@@ -282,10 +283,10 @@ auto subject2name(const std::string & subject) -> X509_NAME_ptr
 
     if (subject.empty()) { return name; }
 
-    size_t prev = 1;
+    int prev = 1;
     std::string type{};
     char chr = '=';
-    for (size_t i=0; subject[i] != 0; ) {
+    for (int i=0; subject[i] != 0; ) {
         ++i;
         if (subject[i]=='\\' && subject[++i]=='\0') {
             throw std::runtime_error("subject2name errror: escape at the end");
@@ -299,11 +300,11 @@ auto subject2name(const std::string & subject) -> X509_NAME_ptr
             if (nid == NID_undef) {
                 // skip unknown entries (silently?).
             } else {
-                auto val = // X509_NAME_add_entry_by_NID wants it unsigned:
+                const auto *val = // X509_NAME_add_entry_by_NID wants it unsigned:
                     //NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
                     reinterpret_cast<const unsigned char *>(&subject[prev]);
 
-                auto len = i - prev;
+                int len = i - prev;
 
                 if ( X509_NAME_add_entry_by_NID(name.get(), nid,
                         MBSTRING_ASC, //NOLINT(hicpp-signed-bitwise) is macro
@@ -329,7 +330,7 @@ void selfsigned(const EVP_PKEY_ptr & pkey, const int days,
                 const std::string & subject, const std::string & crtpath,
                 const bool use_pem)
 {
-    auto x509 = X509_new();
+    auto *x509 = X509_new();
 
     if (x509 == nullptr) {
         std::string errmsg{"selfsigned error: cannot create X509 structure\n"};
@@ -372,7 +373,7 @@ void selfsigned(const EVP_PKEY_ptr & pkey, const int days,
         freeX509_and_throw("issuer");
     }
 
-    auto bignum = BN_new();
+    auto *bignum = BN_new();
 
     if (bignum == nullptr) { freeX509_and_throw("serial (creating big number struct)"); }
 
