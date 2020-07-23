@@ -64,10 +64,13 @@ public:
     { }
 
 
-    [[nodiscard]] auto code() const -> regex_constants::error_type
-    { return errcode; }
+    [[nodiscard]] auto virtual code() const -> regex_constants::error_type;
 
 };
+
+
+[[nodiscard]] auto regex_error::code() const -> regex_constants::error_type
+{ return errcode; }
 
 
 
@@ -105,12 +108,15 @@ public:
     inline auto operator=(regex &&) -> regex & = delete;
 
 
-    explicit regex(const std::string & str)
-    : re{ pcre_compile2(str.c_str(), 0, &errcode, &errptr, &erroffset,nullptr) }
+    explicit regex(const std::string & str) : regex(str.c_str()) {}
+
+
+    explicit regex(const char * const str)
+    : re{ pcre_compile2(str, 0, &errcode, &errptr, &erroffset,nullptr) }
     {
         if (re==nullptr) {
             std::string what = std::string("regex error: ") + errptr + '\n';
-            what += "    '" + str + "'\n";
+            what += "    '" + std::string{str} + "'\n";
             what += "     " + std::string(erroffset, ' ') + '^';
 
             throw regex_error(errcode_pcre2regex.at(errcode), what.c_str());
@@ -209,8 +215,8 @@ inline auto regex_search(const std::string & subj, const regex & rgx)
     if (rgx()==nullptr) {
         throw std::runtime_error("regex_search error: no regex given");
     }
-    int n = pcre_exec(rgx(), nullptr, subj.c_str(), subj.length(),
-                      0, 0, nullptr, 0);
+    int n = pcre_exec(rgx(), nullptr, subj.c_str(),
+                      static_cast<int>(subj.length()), 0, 0, nullptr, 0);
     return n>=0;
 }
 
@@ -231,7 +237,7 @@ auto regex_search(const std::string::const_iterator begin,
     match.vec.reserve(sz);
 
     const char * subj = &*begin;
-    size_t len = &*end - subj;
+    int len = static_cast<int>(&*end - subj);
 
     match.begin = begin;
     match.end = end;
@@ -256,7 +262,7 @@ auto smatch::format(const std::string & fmt) const {
     std::string ret{};
     size_t index = 0;
 
-    size_t pos;
+    size_t pos = 0;
     while ((pos=fmt.find('$', index)) != std::string::npos) {
         ret.append(fmt, index, pos-index);
         index = pos + 1;
