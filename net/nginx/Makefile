@@ -9,8 +9,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=nginx
 PKG_VERSION:=1.19.2
-PKG_RELEASE:=2
-
+PKG_RELEASE:=3
 PKG_SOURCE:=nginx-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://nginx.org/download/
 PKG_HASH:=7c1f7bb13e79433ee930c597d272a64bc6e30c356a48524f38fd34fa88d62473
@@ -93,6 +92,7 @@ endef
 define Package/nginx-ssl
   $(Package/nginx/default)
   TITLE += with SSL support
+  EXTRA_DEPENDS:=nginx-ssl-util$(if $(CONFIG_NGINX_PCRE),,-nopcre) (>=1.5-1) (<2)
   VARIANT:=ssl
   DEPENDS+= +NGINX_PCRE:libpcre \
 	+NGINX_PCRE:nginx-ssl-util +!NGINX_PCRE:nginx-ssl-util-nopcre \
@@ -110,6 +110,7 @@ define Package/nginx-all-module
   TITLE += with ALL module selected
   DEPENDS+=+libpcre +nginx-ssl-util +zlib +liblua +libxml2 +libubus \
 	+libblobmsg-json +libjson-c
+  EXTRA_DEPENDS:=nginx-ssl-util (>=1.5-1) (<2)
   VARIANT:=all-module
   PROVIDES += nginx-ssl
 endef
@@ -357,8 +358,6 @@ define Package/nginx-ssl/install
 	$(INSTALL_BIN) $(PKG_INSTALL_DIR)/usr/sbin/nginx $(1)/usr/sbin/
 	$(INSTALL_DIR) $(1)/etc/nginx/conf.d
 	$(INSTALL_DATA) $(addprefix $(PKG_INSTALL_DIR)/etc/nginx/,$(config_files)) $(1)/etc/nginx/
-	$(INSTALL_CONF) ./files/nginx.conf $(1)/etc/nginx/
-	$(INSTALL_CONF) ./files/_lan.conf $(1)/etc/nginx/conf.d/
 	$(INSTALL_DIR) $(1)/etc/init.d
 	$(INSTALL_BIN) ./files/nginx.init $(1)/etc/init.d/nginx
 ifeq ($(CONFIG_NGINX_NAXSI),y)
@@ -368,25 +367,9 @@ ifeq ($(CONFIG_NGINX_NAXSI),y)
 endif
 	$(if $(CONFIG_NGINX_NAXSI),$($(INSTALL_BIN) $(PKG_BUILD_DIR)/nginx-naxsi/naxsi_config/naxsi_core.rules $(1)/etc/nginx))
 	$(if $(CONFIG_NGINX_NAXSI),$(chmod 0640 $(1)/etc/nginx/naxsi_core.rules))
-	$(INSTALL_CONF) ./files/_redirect2ssl.conf $(1)/etc/nginx/conf.d/
-ifneq ($(CONFIG_IPV6),y)
-	$(SED) '/listen\s*\[/d' $(1)/etc/nginx/conf.d/*.conf # without IPv6 [::]
-endif
 endef
 
 Package/nginx-all-module/install = $(Package/nginx-ssl/install)
-
-define Package/nginx-ssl/prerm
-#!/bin/sh
-[ -z "$${IPKG_INSTROOT}" ] || exit 0
-[ "$${PKG_UPGRADE}" = "1" ] && exit 0
-eval $$(/usr/bin/nginx-util get_env)
-rm -f "$${CONF_DIR}$${LAN_NAME}.crt"
-rm -f "$${CONF_DIR}$${LAN_NAME}.key"
-exit 0
-endef
-
-Package/nginx-all-module/prerm = $(Package/nginx-ssl/prerm)
 
 define Build/Prepare
 	$(Build/Prepare/Default)
